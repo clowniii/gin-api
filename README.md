@@ -15,7 +15,7 @@ ApiAdmin5.0是一个前后端完全分离的项目，前端采用Vue构建，如
 > 第一步：安装代码
 
 ```
-https://github.com/clowniii/gin-api.git
+git clone https://github.com/clowniii/gin-api.git
 ```
 
 
