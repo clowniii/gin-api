@@ -1,0 +1,30 @@
+http:
+  addr: ":8080"
+postgres:
+  dsn: "postgres://user:password@127.0.0.1:5432/apiadmin?sslmode=disable"
+  max_open: 50
+  max_idle: 10
+  auto_migrate: true
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  jti_prefix: "jwt:jti:"
+kafka:
+  brokers: ["127.0.0.1:9092"]
+  op_log_topic: "admin_op_log"
+etcd:
+  endpoints: ["127.0.0.1:2379"]
+  ttl: 15
+jwt:
+  secret: "CHANGE_ME_SECURE"
+  expire_seconds: 7200
+  issuer: "apiadmin"
+log:
+  level: "info"
+  format: "json"
+app_meta:
+  name: "ApiAdmin"
+  version: "5.0"
+wiki:
+  online_time_seconds: 86400
