@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	app, err := boot.InitApp("configs/config.example.yaml")
+	app, err := boot.InitApp("../../configs/config.example.yaml")
 	if err != nil {
 		log.Fatalf("init app: %v", err)
 	}
