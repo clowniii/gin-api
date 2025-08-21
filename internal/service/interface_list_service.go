@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go-apiadmin/internal/domain/model"
+	"go-apiadmin/internal/metrics"
 	"go-apiadmin/internal/pkg/cache"
 	"go-apiadmin/internal/repository/dao"
 )
@@ -69,6 +70,10 @@ func (s *InterfaceListService) infoKeyHash(hash string) string { return "iflist:
 func (s *InterfaceListService) List(ctx context.Context, p ListInterfaceParams) (*ListInterfaceResult, error) {
 	if s.Cache != nil {
 		if v, _ := s.Cache.Get(ctx, s.listKey(p)); v != "" {
+			if cache.IsNilSentinel(v) { // 空 sentinel
+				metrics.CacheNilHit.Inc()
+				return &ListInterfaceResult{List: []InterfaceDTO{}, Total: 0}, nil
+			}
 			var cached ListInterfaceResult
 			if json.Unmarshal([]byte(v), &cached) == nil {
 				return &cached, nil
@@ -78,6 +83,12 @@ func (s *InterfaceListService) List(ctx context.Context, p ListInterfaceParams) 
 	list, total, err := s.DAO.List(ctx, p.Keywords, p.GroupHash, p.Status, p.Page, p.Limit)
 	if err != nil {
 		return nil, err
+	}
+	if len(list) == 0 { // 空结果 sentinel
+		if s.Cache != nil {
+			_ = s.Cache.SetEX(ctx, s.listKey(p), cache.WrapNil(true), 10*time.Second)
+		}
+		return &ListInterfaceResult{List: []InterfaceDTO{}, Total: 0}, nil
 	}
 	res := make([]InterfaceDTO, 0, len(list))
 	for _, m := range list {

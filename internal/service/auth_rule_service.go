@@ -4,12 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"go-apiadmin/internal/domain/model"
 	"go-apiadmin/internal/pkg/cache"
 	"go-apiadmin/internal/repository/dao"
+
+	"go-apiadmin/internal/metrics"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type AuthRuleService struct {
@@ -26,6 +33,9 @@ func NewAuthRuleService(r *dao.AdminAuthRuleDAO, perm *PermissionService) *AuthR
 func NewAuthRuleServiceWithCache(r *dao.AdminAuthRuleDAO, perm *PermissionService, c cache.Cache) *AuthRuleService {
 	return &AuthRuleService{Rules: r, Perm: perm, Cache: c}
 }
+
+// tracer
+func (s *AuthRuleService) tracer() trace.Tracer { return otel.Tracer("service.auth_rule") }
 
 type RuleDTO struct {
 	ID      int64  `json:"id"`
@@ -50,8 +60,14 @@ func (s *AuthRuleService) listKey(gid *int64) string {
 }
 
 func (s *AuthRuleService) List(ctx context.Context, p ListRuleParams) (*ListRuleResult, error) {
+	ctx, span := s.tracer().Start(ctx, "AuthRuleService.List")
+	defer span.End()
 	if s.Cache != nil {
 		if v, _ := s.Cache.Get(ctx, s.listKey(p.GroupID)); v != "" {
+			if cache.IsNilSentinel(v) {
+				metrics.CacheNilHit.Inc()
+				return &ListRuleResult{List: []RuleDTO{}}, nil
+			}
 			var cached ListRuleResult
 			if json.Unmarshal([]byte(v), &cached) == nil {
 				return &cached, nil
@@ -60,7 +76,15 @@ func (s *AuthRuleService) List(ctx context.Context, p ListRuleParams) (*ListRule
 	}
 	list, err := s.Rules.List(ctx, p.GroupID)
 	if err != nil {
-		return nil, err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("list auth rules: %w", err)
+	}
+	if len(list) == 0 { // 空结果穿透保护
+		if s.Cache != nil {
+			_ = s.Cache.SetEX(ctx, s.listKey(p.GroupID), cache.WrapNil(true), cache.JitterTTL(15*time.Second))
+		}
+		return &ListRuleResult{List: []RuleDTO{}}, nil
 	}
 	res := make([]RuleDTO, 0, len(list))
 	for _, r := range list {
@@ -69,7 +93,7 @@ func (s *AuthRuleService) List(ctx context.Context, p ListRuleParams) (*ListRule
 	result := &ListRuleResult{List: res}
 	if s.Cache != nil {
 		b, _ := json.Marshal(result)
-		_ = s.Cache.SetEX(ctx, s.listKey(p.GroupID), string(b), 60*time.Second)
+		_ = s.Cache.SetEX(ctx, s.listKey(p.GroupID), string(b), cache.JitterTTL(60*time.Second))
 	}
 	return result, nil
 }
@@ -82,6 +106,8 @@ type AddRuleParams struct {
 }
 
 func (s *AuthRuleService) Add(ctx context.Context, p AddRuleParams) error {
+	ctx, span := s.tracer().Start(ctx, "AuthRuleService.Add")
+	defer span.End()
 	if p.URL == "" {
 		return errors.New("url required")
 	}
@@ -91,8 +117,12 @@ func (s *AuthRuleService) Add(ctx context.Context, p AddRuleParams) error {
 	}
 	obj := &model.AdminAuthRule{URL: u, GroupID: p.GroupID, Auth: p.Auth, Status: p.Status}
 	if err := s.Rules.Create(ctx, obj); err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("create auth rule: %w", err)
 	}
+	// 新增规则后需要使该组用户的权限缓存失效，保持与 Edit/Delete/ChangeStatus 行为一致
+	go s.Perm.InvalidateUsersByGroup(context.Background(), p.GroupID)
 	s.invalidate(p.GroupID)
 	return nil
 }
@@ -106,12 +136,16 @@ type EditRuleParams struct {
 }
 
 func (s *AuthRuleService) Edit(ctx context.Context, p EditRuleParams) error {
+	ctx, span := s.tracer().Start(ctx, "AuthRuleService.Edit")
+	defer span.End()
 	if p.ID <= 0 {
 		return errors.New("invalid id")
 	}
 	r, err := s.Rules.FindByID(ctx, p.ID)
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("find rule: %w", err)
 	}
 	if r == nil {
 		return errors.New("not found")
@@ -134,7 +168,9 @@ func (s *AuthRuleService) Edit(ctx context.Context, p EditRuleParams) error {
 		r.Status = *p.Status
 	}
 	if err := s.Rules.Update(ctx, r); err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("update rule: %w", err)
 	}
 	// 失效权限
 	go s.Perm.InvalidateUsersByGroup(context.Background(), r.GroupID)
@@ -146,11 +182,15 @@ func (s *AuthRuleService) Edit(ctx context.Context, p EditRuleParams) error {
 }
 
 func (s *AuthRuleService) ChangeStatus(ctx context.Context, id int64, status int8) error {
+	ctx, span := s.tracer().Start(ctx, "AuthRuleService.ChangeStatus")
+	defer span.End()
 	if id <= 0 {
 		return errors.New("invalid id")
 	}
 	if err := s.Rules.UpdateStatus(ctx, id, status); err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("update status: %w", err)
 	}
 	// 简化: 找到该规则所属组，失效其缓存
 	r, _ := s.Rules.FindByID(ctx, id)
@@ -162,12 +202,16 @@ func (s *AuthRuleService) ChangeStatus(ctx context.Context, id int64, status int
 }
 
 func (s *AuthRuleService) Delete(ctx context.Context, id int64) error {
+	ctx, span := s.tracer().Start(ctx, "AuthRuleService.Delete")
+	defer span.End()
 	if id <= 0 {
 		return errors.New("invalid id")
 	}
 	r, _ := s.Rules.FindByID(ctx, id)
 	if err := s.Rules.Delete(ctx, id); err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("delete rule: %w", err)
 	}
 	if r != nil {
 		go s.Perm.InvalidateUsersByGroup(context.Background(), r.GroupID)
@@ -178,13 +222,17 @@ func (s *AuthRuleService) Delete(ctx context.Context, id int64) error {
 
 // BulkEditRules 批量增删规则（用于 /admin/Auth/editRule 兼容）
 func (s *AuthRuleService) BulkEditRules(ctx context.Context, groupID int64, rules []string) error {
+	ctx, span := s.tracer().Start(ctx, "AuthRuleService.BulkEditRules")
+	defer span.End()
 	if groupID <= 0 {
 		return errors.New("invalid group id")
 	}
 	// 读取现有
 	existing, err := s.Rules.ListByGroupID(ctx, groupID)
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("list rules by group: %w", err)
 	}
 	existSet := make(map[string]struct{}, len(existing))
 	for _, r := range existing {
@@ -215,7 +263,9 @@ func (s *AuthRuleService) BulkEditRules(ctx context.Context, groupID int64, rule
 	// 批量插入
 	for _, r := range addList {
 		if err := s.Rules.Create(ctx, r); err != nil {
-			return err
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("bulk add rule: %w", err)
 		}
 	}
 	// 剩余 existSet 中的是要删除的
@@ -225,7 +275,9 @@ func (s *AuthRuleService) BulkEditRules(ctx context.Context, groupID int64, rule
 			urls = append(urls, u)
 		}
 		if err := s.Rules.DeleteByGroupAndURLs(ctx, groupID, urls); err != nil {
-			return err
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("bulk delete rule: %w", err)
 		}
 	}
 	// 失效该组用户权限缓存

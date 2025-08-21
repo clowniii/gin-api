@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go-apiadmin/internal/domain/model"
+	"go-apiadmin/internal/metrics"
 	"go-apiadmin/internal/pkg/cache"
 	"go-apiadmin/internal/repository/dao"
 )
@@ -64,6 +65,10 @@ func (s *InterfaceGroupService) infoKeyHash(hash string) string { return "ifgrou
 func (s *InterfaceGroupService) List(ctx context.Context, p ListInterfaceGroupParams) (*ListInterfaceGroupResult, error) {
 	if s.Cache != nil {
 		if v, _ := s.Cache.Get(ctx, s.listKey(p)); v != "" {
+			if cache.IsNilSentinel(v) {
+				metrics.CacheNilHit.Inc()
+				return &ListInterfaceGroupResult{List: []InterfaceGroupDTO{}, Total: 0}, nil
+			}
 			var cached ListInterfaceGroupResult
 			if json.Unmarshal([]byte(v), &cached) == nil {
 				return &cached, nil
@@ -73,6 +78,12 @@ func (s *InterfaceGroupService) List(ctx context.Context, p ListInterfaceGroupPa
 	list, total, err := s.DAO.List(ctx, p.Keywords, p.AppID, p.Status, p.Page, p.Limit)
 	if err != nil {
 		return nil, err
+	}
+	if len(list) == 0 { // 空结果 sentinel
+		if s.Cache != nil {
+			_ = s.Cache.SetEX(ctx, s.listKey(p), cache.WrapNil(true), 10*time.Second)
+		}
+		return &ListInterfaceGroupResult{List: []InterfaceGroupDTO{}, Total: 0}, nil
 	}
 	res := make([]InterfaceGroupDTO, 0, len(list))
 	for _, m := range list {

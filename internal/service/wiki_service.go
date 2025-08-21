@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go-apiadmin/internal/domain/model"
+	"go-apiadmin/internal/metrics"
 	"go-apiadmin/internal/pkg/cache"
 	"go-apiadmin/internal/repository/dao"
 )
@@ -182,6 +183,10 @@ func (s *WikiService) Search(ctx context.Context, keyword string, limit int) []m
 	ckey := cachePrefixSearch + keyword + ":" + intToStr(int64(limit))
 	if s.Cache != nil {
 		if str, err := s.Cache.Get(ctx, ckey); err == nil && str != "" {
+			if cache.IsNilSentinel(str) { // sentinel 命中
+				metrics.CacheNilHit.Inc()
+				return []map[string]interface{}{}
+			}
 			var cached []map[string]interface{}
 			_ = json.Unmarshal([]byte(str), &cached)
 			if len(cached) > 0 {
@@ -206,7 +211,11 @@ func (s *WikiService) Search(ctx context.Context, keyword string, limit int) []m
 			})
 		}
 	}
-	if s.Cache != nil && len(res) > 0 {
+	if s.Cache != nil {
+		if len(res) == 0 { // 空结果防穿透
+			_ = s.Cache.SetEX(ctx, ckey, cache.WrapNil(true), 10*time.Second)
+			return res
+		}
 		b, _ := json.Marshal(res)
 		_ = s.Cache.SetEX(ctx, ckey, string(b), 30*time.Second)
 	}
@@ -221,6 +230,10 @@ func (s *WikiService) HotGroups(ctx context.Context, limit int) []map[string]int
 	ckey := cachePrefixHotGroup + intToStr(int64(limit))
 	if s.Cache != nil {
 		if str, err := s.Cache.Get(ctx, ckey); err == nil && str != "" {
+			if cache.IsNilSentinel(str) {
+				metrics.CacheNilHit.Inc()
+				return []map[string]interface{}{}
+			}
 			var cached []map[string]interface{}
 			_ = json.Unmarshal([]byte(str), &cached)
 			if len(cached) > 0 {
@@ -240,7 +253,11 @@ func (s *WikiService) HotGroups(ctx context.Context, limit int) []map[string]int
 	for _, g := range groups {
 		res = append(res, map[string]interface{}{"id": g.ID, "name": g.Name, "description": g.Description, "hot": g.Hot, "hash": g.Hash})
 	}
-	if s.Cache != nil && len(res) > 0 {
+	if s.Cache != nil {
+		if len(res) == 0 { // 空结果 sentinel
+			_ = s.Cache.SetEX(ctx, ckey, cache.WrapNil(true), 10*time.Second)
+			return res
+		}
 		b, _ := json.Marshal(res)
 		_ = s.Cache.SetEX(ctx, ckey, string(b), 60*time.Second)
 	}

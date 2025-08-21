@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"go-apiadmin/internal/boot"
+
+	"go.uber.org/zap"
 )
 
 func main() {
-	app, err := boot.InitApp("../../configs/config.example.yaml")
+	app, err := boot.InitApp("../../configs/config.dev.yaml")
 	if err != nil {
 		log.Fatalf("init app: %v", err)
 	}
@@ -23,28 +25,17 @@ func main() {
 	defer stop()
 
 	go func() {
-		app.Logger.Info("http server start", zapField("addr", app.Config.HTTP.Addr))
+		app.Logger.Info("http_server_start", zap.String("addr", app.Config.HTTP.Addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			app.Logger.Error("server error", zapField("err", err.Error()))
+			app.Logger.Error("http_server_error", zap.Error(err))
 		}
 	}()
 
 	<-ctx.Done()
-	app.Logger.Info("shutting down")
+	app.Logger.Info("shutting_down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
 	app.Close()
-	app.Logger.Info("cleanup done")
+	app.Logger.Info("cleanup_done")
 }
-
-// simple wrapper keep
-func zapField(k string, v interface{}) loggingField { return loggingField{k, v} }
-
-type loggingField struct {
-	k string
-	v interface{}
-}
-
-func (l loggingField) Key() string        { return l.k }
-func (l loggingField) Value() interface{} { return l.v }

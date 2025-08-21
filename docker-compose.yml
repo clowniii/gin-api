@@ -1,0 +1,124 @@
+version: "3.9"
+
+# 说明:
+# 1. app 服务使用 golang 官方镜像直接 go run，便于本地开发调试（热更新可配合 air / reflex 等后续自加）。
+# 2. 生产环境请改为使用多阶段构建生成二进制后再运行的精简镜像。
+# 3. 当前 configs/config.dev.yaml 内的 Postgres/Redis/Kafka/Etcd 地址是 127.0.0.1，需要改为对应服务名：
+#    - postgres.dsn: postgres://user:password@postgres:5432/apiadmin?sslmode=disable
+#    - redis.addr: redis:6379
+#    - kafka.brokers: ["kafka:9092"]
+#    - etcd.endpoints: ["etcd:2379"]
+#    - otel.endpoint (如启用): otel-collector:4317
+# 4. 如果不想修改现有 dev 配置，可额外复制一份 config.compose.yaml 做上述替换，并在 main.go 中指定。
+# 5. Kafka 使用单节点 KRaft 模式（非 Zookeeper）。仅适合开发测试。
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: apiadmin-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: apiadmin
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d apiadmin"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: apiadmin-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: apiadmin-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ENABLE_KRAFT: "yes"
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.13
+    container_name: apiadmin-etcd
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd1
+      - --data-dir=/etcd-data
+      - --advertise-client-urls=http://0.0.0.0:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+    ports:
+      - "2379:2379"
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    container_name: apiadmin-otel
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP (可选)
+    volumes:
+      - ./deploy/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+
+  app:
+    image: golang:1.22-alpine
+    container_name: apiadmin-app
+    working_dir: /app
+    command: ["go", "run", "./cmd/api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    environment:
+      GIN_MODE: release
+    volumes:
+      - ./:/app
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
+
+# 可选: prometheus / grafana 后续需要再补。

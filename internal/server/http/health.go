@@ -56,6 +56,7 @@ func (h *HealthChecker) Readiness(ctx context.Context) (map[string]interface{}, 
 	res := map[string]interface{}{
 		"status": "ok",
 		"time":   time.Now().Format(time.RFC3339),
+		"detail": []map[string]interface{}{},
 	}
 
 	type depResult struct {
@@ -195,6 +196,7 @@ func (h *HealthChecker) Readiness(ctx context.Context) (map[string]interface{}, 
 			}
 		}
 		res[r.name+"_duration_ms"] = float64(r.dur.Microseconds()) / 1000.0
+		res["detail"] = append(res["detail"].([]map[string]interface{}), map[string]interface{}{"dep": r.name, "up": r.up, "error": r.err, "duration_ms": float64(r.dur.Microseconds()) / 1000.0})
 	}
 	if upTotal < len(deps) {
 		res["status"] = "degraded"

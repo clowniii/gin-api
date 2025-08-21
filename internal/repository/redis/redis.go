@@ -2,8 +2,10 @@ package redisrepo
 
 import (
 	"context"
+	"sync"
 	"time"
 
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -15,8 +17,12 @@ type Config struct {
 
 type Client struct{ *redis.Client }
 
+var onceInstr sync.Once
+
 func New(cfg Config) *Client {
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.Addr, Password: cfg.Password, DB: cfg.DB})
+	// 尝试注册 otel tracing（幂等）
+	onceInstr.Do(func() { _ = redisotel.InstrumentTracing(rdb) })
 	return &Client{rdb}
 }
 

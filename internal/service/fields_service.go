@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go-apiadmin/internal/domain/model"
+	"go-apiadmin/internal/metrics"
 	"go-apiadmin/internal/pkg/cache"
 	"go-apiadmin/internal/repository/dao"
 )
@@ -66,6 +67,10 @@ func (s *FieldsService) List(ctx context.Context, p ListFieldsParams) (*ListFiel
 	ck := s.cacheKey(p.Hash, p.Type, p.Page, p.Limit)
 	if s.Cache != nil {
 		if str, _ := s.Cache.Get(ctx, ck); str != "" {
+			if cache.IsNilSentinel(str) { // 空 sentinel
+				metrics.CacheNilHit.Inc()
+				return &ListFieldsResult{List: []FieldDTO{}, Count: 0, DataType: dataTypeMap, ApiInfo: nil}, nil
+			}
 			var r ListFieldsResult
 			if json.Unmarshal([]byte(str), &r) == nil {
 				return &r, nil
@@ -75,6 +80,12 @@ func (s *FieldsService) List(ctx context.Context, p ListFieldsParams) (*ListFiel
 	list, total, err := s.DAO.List(ctx, p.Hash, p.Type, p.Page, p.Limit)
 	if err != nil {
 		return nil, err
+	}
+	if len(list) == 0 { // 空结果防穿透
+		if s.Cache != nil {
+			_ = s.Cache.SetEX(ctx, ck, cache.WrapNil(true), 10*time.Second)
+		}
+		return &ListFieldsResult{List: []FieldDTO{}, Count: 0, DataType: dataTypeMap, ApiInfo: nil}, nil
 	}
 	res := make([]FieldDTO, 0, len(list))
 	for _, m := range list {

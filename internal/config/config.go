@@ -1,6 +1,9 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/spf13/viper"
 )
 
@@ -64,15 +67,37 @@ func Load(path string) (*Config, error) {
 	}
 	// 默认值
 	v.SetDefault("wiki.online_time_seconds", 86400)
-	v.SetDefault("app_meta.name", "ApiAdmin")
+	v.SetDefault("app_meta.name", "GOAPIAdmin")
 	v.SetDefault("app_meta.version", "v1")
 	v.SetDefault("upload.max_size_mb", 10)
 	v.SetDefault("upload.allowed_ext", []string{"jpg", "jpeg", "png", "gif", "pdf", "txt", "zip", "json"})
 	v.SetDefault("otel.enable", false)
 	v.SetDefault("otel.sampler_ratio", 1.0)
+	v.SetDefault("otel.insecure", true)
 	var c Config
 	if err := v.Unmarshal(&c); err != nil {
 		return nil, err
+	}
+	// ===== 逻辑校验 =====
+	if c.HTTP.Addr == "" {
+		return nil, errors.New("http.addr required")
+	}
+	if c.JWT.Secret == "" || len(c.JWT.Secret) < 16 {
+		return nil, fmt.Errorf("jwt.secret too short (>=16)")
+	}
+	if c.JWT.ExpireSeconds <= 0 {
+		return nil, fmt.Errorf("jwt.expire_seconds must >0")
+	}
+	if c.OTel.Enable {
+		if c.OTel.Endpoint == "" {
+			return nil, errors.New("otel.endpoint required when otel.enable=true")
+		}
+		if c.OTel.SamplerRatio < 0 || c.OTel.SamplerRatio > 1 {
+			return nil, errors.New("otel.sampler_ratio must be in [0,1]")
+		}
+	}
+	if len(c.Redis.JTIPrefix) == 0 {
+		c.Redis.JTIPrefix = "jwt:jti:"
 	}
 	return &c, nil
 }

@@ -22,6 +22,9 @@ func New(cfg Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// otelgorm 插件在 provider 中统一开启 (boot/provider.go) 确保只注册一次
+	// 若未来需要在此处直接启用可： db.Use(tracing.NewPlugin())
+	// 保持最小职责，这里不重复启用。
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, err

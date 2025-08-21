@@ -26,7 +26,8 @@ import (
 // NewRouter 仅负责分组与中间件装配，具体业务放在 handler 层
 func NewRouter(jwtm *jwt.Manager, logger *logging.Logger, producer *kafka.Producer, db *gorm.DB, redis *redisrepo.Client, authSvc *service.AuthService, userSvc *service.UserService, permSvc *service.PermissionService, menuSvc *service.MenuService, authGroupSvc *service.AuthGroupService, authRuleSvc *service.AuthRuleService, appSvc *service.AppService, appGroupSvc *service.AppGroupService, ifgSvc *service.InterfaceGroupService, iflSvc *service.InterfaceListService, fieldsSvc *service.FieldsService, logSvc *service.LogService, etcdCli *etcd.Client, cfg *config.Config, wikiSvc *service.WikiService) *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery(), middleware.CORS(), obs.TraceMiddleware(), middleware.ResponseWrapper(), obs.Metrics())
+	// 新增 ConfigInjector 放最前确保后续中间件可读取 app_config
+	r.Use(middleware.ConfigInjector(cfg), gin.Recovery(), middleware.CORS(), obs.TraceMiddleware(), obs.LoggerContextMiddleware(logger), middleware.ResponseWrapper(), obs.Metrics())
 
 	// 健康检查
 	hc := NewHealthChecker(db, redis, producer, etcdCli)
@@ -58,6 +59,8 @@ func NewRouter(jwtm *jwt.Manager, logger *logging.Logger, producer *kafka.Produc
 	v1 := r.Group("/admin") // 沿用原路径结构 (轻量公共 + 认证接口分组)，不含 OperationLog
 	{
 		v1.POST("/Login/index", h.Auth.Login)
+		// 新增刷新令牌接口：POST /admin/Login/refresh
+		v1.POST("/Login/refresh", h.Auth.Refresh)
 		v1.GET("/Login/getUserInfo", sec.Auth(jwtm, logger), sec.Permission(permSvc), sec.Require(), h.Auth.GetUserInfo)
 		v1.GET("/Login/getAccessMenu", sec.Auth(jwtm, logger), sec.Permission(permSvc), h.Auth.GetAccessMenu)
 		v1.POST("/Login/logout", h.Auth.Logout)

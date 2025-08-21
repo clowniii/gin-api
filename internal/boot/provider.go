@@ -11,19 +11,23 @@ import (
 	"go-apiadmin/internal/repository/postgres"
 	redisrepo "go-apiadmin/internal/repository/redis"
 	"go-apiadmin/internal/security/jwt"
+	"time"
 
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"github.com/gin-gonic/gin"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	go_otel "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/redis/go-redis/extra/redisotel/v9"
+	"gorm.io/plugin/opentelemetry/tracing"
 )
 
 type Dependencies struct {
@@ -77,15 +81,23 @@ func NewLogger(c *config.Config) (*logging.Logger, error) {
 }
 
 func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Client, k *kafka.Producer, e *etcd.Client, j *jwt.Manager, engine *gin.Engine) *App {
-	// 自动迁移（只在配置开启时）
+	// 自动迁移（只在配置开启时）: 补充更多模型
 	if c.Postgres.AutoMigrate {
-		_ = postgres.AutoMigrateModels(db,
+		if err := postgres.AutoMigrateModels(db,
 			&model.AdminUser{},
 			&model.AdminAuthGroup{},
 			&model.AdminAuthRule{},
 			&model.AdminAuthGroupAccess{},
 			&model.AdminUserAction{},
-		)
+			&model.AdminMenu{},
+			&model.AdminApp{},
+			&model.AdminAppGroup{},
+			&model.AdminInterfaceGroup{},
+			&model.AdminInterfaceList{},
+			&model.AdminField{},
+		); err != nil {
+			l.Error("auto_migrate_failed", zap.Error(err))
+		}
 	}
 	app := &App{Config: c, Logger: l, DB: db, Redis: r, Kafka: k, Etcd: e, JWT: j, HTTP: engine}
 	if e != nil && len(c.Etcd.Endpoints) > 0 {
@@ -93,18 +105,34 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 			ctx := context.Background()
 			serviceKey := fmt.Sprintf("/services/apiadmin/%s/%s", c.AppMeta.Version, c.HTTP.Addr)
 			val := fmt.Sprintf("{\"addr\":\"%s\",\"version\":\"%s\"}", c.HTTP.Addr, c.AppMeta.Version)
-			leaseID, err := e.Register(ctx, serviceKey, val, int64(c.Etcd.TTL))
-			if err != nil {
-				l.Error("etcd register failed", zap.Error(err))
+			// 指数退避重试注册
+			var (
+				attempt     = 0
+				maxAttempts = 5
+			)
+			for {
+				leaseID, err := e.Register(ctx, serviceKey, val, int64(c.Etcd.TTL))
+				if err != nil {
+					attempt++
+					if attempt >= maxAttempts {
+						l.Error("etcd_register_failed", zap.Error(err), zap.Int("attempt", attempt))
+						return
+					}
+					backoff := time.Duration(1<<attempt) * 100 * time.Millisecond
+					l.Error("etcd_register_retry", zap.Error(err), zap.Int("attempt", attempt), zap.Duration("backoff", backoff))
+					time.Sleep(backoff)
+					continue
+				}
+				app.serviceKey = serviceKey
+				app.leaseID = leaseID
+				l.Info("etcd_registered", zap.String("key", serviceKey))
 				return
 			}
-			app.serviceKey = serviceKey
-			app.leaseID = leaseID
 		}()
 	}
 	// OpenTelemetry 初始化（可选）
 	if c.OTel.Enable {
-		ctx, cancel := context.WithTimeout(context.Background(), 5e9) // 5s
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(c.OTel.Endpoint)}
 		if c.OTel.Insecure {
@@ -114,7 +142,7 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 		}
 		exp, err := otlptracegrpc.New(ctx, opts...)
 		if err != nil {
-			l.Error("otel exporter init failed", zap.Error(err))
+			l.Error("otel_exporter_init_failed", zap.Error(err))
 		} else {
 			res, _ := resource.Merge(resource.Default(), resource.NewWithAttributes(
 				semconv.SchemaURL,
@@ -124,6 +152,26 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 			var sampler trace.Sampler = trace.ParentBased(trace.TraceIDRatioBased(c.OTel.SamplerRatio))
 			app.tracerProv = trace.NewTracerProvider(trace.WithBatcher(exp), trace.WithResource(res), trace.WithSampler(sampler))
 			go_otel.SetTracerProvider(app.tracerProv)
+			l.Info("otel_tracer_provider_initialized")
+			// ===== GORM instrumentation =====
+			if db != nil {
+				if err := db.Use(tracing.NewPlugin()); err != nil {
+					l.Error("gorm_tracing_plugin_failed", zap.Error(err))
+				} else {
+					l.Info("gorm_tracing_plugin_enabled")
+				}
+			}
+			// ===== Redis instrumentation =====
+			if r != nil {
+				// 为 go-redis 注册 tracing hook
+				if err := redisotel.InstrumentTracing(r.Client); err != nil {
+					l.Error("redis_tracing_hook_failed", zap.Error(err))
+				} else {
+					l.Info("redis_otel_tracing_enabled")
+				}
+			}
+			// Kafka 生产者无需额外初始化，此处仅记录
+			l.Info("kafka_producer_tracing_enabled")
 		}
 	}
 	return app
@@ -132,25 +180,37 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 func (a *App) Close() {
 	// 优雅下线 etcd
 	if a.Etcd != nil && a.serviceKey != "" && a.leaseID != 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*1e9)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = a.Etcd.Deregister(ctx, a.serviceKey, a.leaseID)
+		if err := a.Etcd.Deregister(ctx, a.serviceKey, a.leaseID); err != nil {
+			a.Logger.Error("etcd_deregister_failed", zap.Error(err))
+		}
 	}
 	if a.DB != nil {
 		if sqlDB, err := a.DB.DB(); err == nil {
-			_ = sqlDB.Close()
+			if err := sqlDB.Close(); err != nil {
+				a.Logger.Error("db_close_error", zap.Error(err))
+			}
 		}
 	}
 	if a.Redis != nil {
-		_ = a.Redis.Close()
+		if err := a.Redis.Close(); err != nil {
+			a.Logger.Error("redis_close_error", zap.Error(err))
+		}
 	}
 	if a.Kafka != nil {
-		_ = a.Kafka.Close()
+		if err := a.Kafka.Close(); err != nil {
+			a.Logger.Error("kafka_close_error", zap.Error(err))
+		}
 	}
 	if a.Etcd != nil {
-		_ = a.Etcd.Close()
+		if err := a.Etcd.Close(); err != nil {
+			a.Logger.Error("etcd_close_error", zap.Error(err))
+		}
 	}
 	if a.tracerProv != nil {
-		_ = a.tracerProv.Shutdown(context.Background())
+		if err := a.tracerProv.Shutdown(context.Background()); err != nil {
+			a.Logger.Error("otel_tracer_shutdown_error", zap.Error(err))
+		}
 	}
 }

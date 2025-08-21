@@ -10,6 +10,8 @@ import (
 	"go-apiadmin/internal/domain/model"
 	"go-apiadmin/internal/pkg/cache"
 	"go-apiadmin/internal/repository/dao"
+
+	"go-apiadmin/internal/metrics"
 )
 
 type AppGroupService struct {
@@ -43,6 +45,10 @@ func (s *AppGroupService) listKey() string { return "appgroup:list" }
 func (s *AppGroupService) List(ctx context.Context) (*ListAppGroupResult, error) {
 	if s.Cache != nil {
 		if v, _ := s.Cache.Get(ctx, s.listKey()); v != "" {
+			if cache.IsNilSentinel(v) {
+				metrics.CacheNilHit.Inc()
+				return &ListAppGroupResult{List: []AppGroupDTO{}}, nil
+			}
 			var cached ListAppGroupResult
 			if json.Unmarshal([]byte(v), &cached) == nil {
 				return &cached, nil
@@ -53,6 +59,12 @@ func (s *AppGroupService) List(ctx context.Context) (*ListAppGroupResult, error)
 	if err != nil {
 		return nil, err
 	}
+	if len(list) == 0 { // 空结果穿透保护
+		if s.Cache != nil {
+			_ = s.Cache.SetEX(ctx, s.listKey(), cache.WrapNil(true), cache.JitterTTL(15*time.Second))
+		}
+		return &ListAppGroupResult{List: []AppGroupDTO{}}, nil
+	}
 	res := make([]AppGroupDTO, 0, len(list))
 	for _, g := range list {
 		res = append(res, AppGroupDTO{ID: g.ID, Name: g.Name, Description: g.Description, Status: g.Status, Hash: g.Hash})
@@ -60,7 +72,7 @@ func (s *AppGroupService) List(ctx context.Context) (*ListAppGroupResult, error)
 	result := &ListAppGroupResult{List: res}
 	if s.Cache != nil {
 		b, _ := json.Marshal(result)
-		_ = s.Cache.SetEX(ctx, s.listKey(), string(b), 60*time.Second)
+		_ = s.Cache.SetEX(ctx, s.listKey(), string(b), cache.JitterTTL(60*time.Second))
 	}
 	return result, nil
 }

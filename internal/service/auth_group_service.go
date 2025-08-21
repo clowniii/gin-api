@@ -10,6 +10,8 @@ import (
 	"go-apiadmin/internal/domain/model"
 	"go-apiadmin/internal/pkg/cache"
 	"go-apiadmin/internal/repository/dao"
+
+	"go-apiadmin/internal/metrics"
 )
 
 type AuthGroupService struct {
@@ -44,6 +46,10 @@ func (s *AuthGroupService) listKey() string { return "authgroup:list" }
 func (s *AuthGroupService) List(ctx context.Context) (*ListGroupResult, error) {
 	if s.Cache != nil {
 		if v, _ := s.Cache.Get(ctx, s.listKey()); v != "" {
+			if cache.IsNilSentinel(v) {
+				metrics.CacheNilHit.Inc()
+				return &ListGroupResult{List: []GroupDTO{}}, nil
+			}
 			var cached ListGroupResult
 			if json.Unmarshal([]byte(v), &cached) == nil {
 				return &cached, nil
@@ -54,6 +60,12 @@ func (s *AuthGroupService) List(ctx context.Context) (*ListGroupResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(list) == 0 { // 空结果穿透保护
+		if s.Cache != nil {
+			_ = s.Cache.SetEX(ctx, s.listKey(), cache.WrapNil(true), cache.JitterTTL(15*time.Second))
+		}
+		return &ListGroupResult{List: []GroupDTO{}}, nil
+	}
 	res := make([]GroupDTO, 0, len(list))
 	for _, g := range list {
 		res = append(res, GroupDTO{ID: g.ID, Name: g.Name, Description: g.Description, Status: g.Status})
@@ -61,7 +73,7 @@ func (s *AuthGroupService) List(ctx context.Context) (*ListGroupResult, error) {
 	result := &ListGroupResult{List: res}
 	if s.Cache != nil {
 		b, _ := json.Marshal(result)
-		_ = s.Cache.SetEX(ctx, s.listKey(), string(b), 60*time.Second)
+		_ = s.Cache.SetEX(ctx, s.listKey(), string(b), cache.JitterTTL(60*time.Second))
 	}
 	return result, nil
 }

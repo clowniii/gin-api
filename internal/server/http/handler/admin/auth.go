@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"time"
+
+	"go-apiadmin/internal/metrics"
 	"go-apiadmin/internal/service"
 	"go-apiadmin/internal/util/retcode"
 	"go-apiadmin/pkg/response"
@@ -14,17 +17,54 @@ type AuthHandler struct{ d Dependencies }
 func NewAuthHandler(d Dependencies) *AuthHandler { return &AuthHandler{d: d} }
 
 func (h *AuthHandler) Login(c *gin.Context) {
+	start := time.Now()
 	var req struct{ Username, Password string }
 	if err := c.ShouldBindJSON(&req); err != nil {
+		metrics.AuthActionTotal.WithLabelValues("login", "parse_error").Inc()
+		metrics.AuthActionDuration.WithLabelValues("login", "parse_error").Observe(time.Since(start).Seconds())
 		response.Error(c, retcode.JSON_PARSE_FAIL, "invalid body")
 		return
 	}
-	token, err := h.d.Auth.Login(c.Request.Context(), req.Username, req.Password)
+	access, refresh, err := h.d.Auth.Login(c.Request.Context(), req.Username, req.Password)
 	if err != nil {
+		metrics.AuthActionTotal.WithLabelValues("login", "error").Inc()
+		metrics.AuthActionDuration.WithLabelValues("login", "error").Observe(time.Since(start).Seconds())
 		response.Error(c, retcode.LOGIN_ERROR, err.Error())
 		return
 	}
-	response.Success(c, gin.H{"token": token})
+	metrics.AuthActionTotal.WithLabelValues("login", "success").Inc()
+	metrics.AuthActionDuration.WithLabelValues("login", "success").Observe(time.Since(start).Seconds())
+	response.Success(c, gin.H{"token": access, "refreshToken": refresh})
+}
+
+// 新增: Refresh 接口，根据 refreshToken 生成新的 token 与新的 refreshToken（旋转）
+func (h *AuthHandler) Refresh(c *gin.Context) {
+	start := time.Now()
+	var req struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		metrics.AuthActionTotal.WithLabelValues("refresh", "parse_error").Inc()
+		metrics.AuthActionDuration.WithLabelValues("refresh", "parse_error").Observe(time.Since(start).Seconds())
+		response.Error(c, retcode.JSON_PARSE_FAIL, "invalid body")
+		return
+	}
+	if req.RefreshToken == "" {
+		metrics.AuthActionTotal.WithLabelValues("refresh", "missing").Inc()
+		metrics.AuthActionDuration.WithLabelValues("refresh", "missing").Observe(time.Since(start).Seconds())
+		response.Error(c, retcode.AUTH_ERROR, "missing refreshToken")
+		return
+	}
+	access, refresh, err := h.d.Auth.Refresh(c.Request.Context(), req.RefreshToken)
+	if err != nil {
+		metrics.AuthActionTotal.WithLabelValues("refresh", "error").Inc()
+		metrics.AuthActionDuration.WithLabelValues("refresh", "error").Observe(time.Since(start).Seconds())
+		response.Error(c, retcode.AUTH_ERROR, err.Error())
+		return
+	}
+	metrics.AuthActionTotal.WithLabelValues("refresh", "success").Inc()
+	metrics.AuthActionDuration.WithLabelValues("refresh", "success").Observe(time.Since(start).Seconds())
+	response.Success(c, gin.H{"token": access, "refreshToken": refresh})
 }
 
 func (h *AuthHandler) GetUserInfo(c *gin.Context) {

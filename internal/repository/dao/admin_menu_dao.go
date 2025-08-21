@@ -3,10 +3,14 @@ package dao
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"go-apiadmin/internal/domain/model"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -14,30 +18,65 @@ type AdminMenuDAO struct{ DB *gorm.DB }
 
 func NewAdminMenuDAO(db *gorm.DB) *AdminMenuDAO { return &AdminMenuDAO{DB: db} }
 
+// tracer 获取 DAO 层 tracer
+func (d *AdminMenuDAO) tracer() trace.Tracer { return otel.Tracer("dao.admin_menu") }
+
 // ListMenus 获取菜单，可按关键词(title 模糊)；keywords 为空时返回全部
 func (d *AdminMenuDAO) ListMenus(ctx context.Context, keywords string) ([]model.AdminMenu, error) {
+	ctx, span := d.tracer().Start(ctx, "AdminMenuDAO.ListMenus")
+	defer span.End()
 	q := d.DB.WithContext(ctx).Model(&model.AdminMenu{})
 	if keywords != "" {
 		q = q.Where("title ILIKE ?", "%"+keywords+"%")
 	}
 	var list []model.AdminMenu
 	if err := q.Order("sort ASC").Find(&list).Error; err != nil {
-		return nil, err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("list menus: %w", err)
 	}
 	return list, nil
 }
 
 func (d *AdminMenuDAO) Create(ctx context.Context, m *model.AdminMenu) error {
-	return d.DB.WithContext(ctx).Create(m).Error
+	ctx, span := d.tracer().Start(ctx, "AdminMenuDAO.Create")
+	defer span.End()
+	if err := d.DB.WithContext(ctx).Create(m).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("create menu: %w", err)
+	}
+	return nil
 }
 func (d *AdminMenuDAO) Update(ctx context.Context, m *model.AdminMenu) error {
-	return d.DB.WithContext(ctx).Model(&model.AdminMenu{}).Where("id=?", m.ID).Updates(m).Error
+	ctx, span := d.tracer().Start(ctx, "AdminMenuDAO.Update")
+	defer span.End()
+	if err := d.DB.WithContext(ctx).Model(&model.AdminMenu{}).Where("id=?", m.ID).Updates(m).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("update menu id=%d: %w", m.ID, err)
+	}
+	return nil
 }
 func (d *AdminMenuDAO) Delete(ctx context.Context, id int64) error {
-	return d.DB.WithContext(ctx).Delete(&model.AdminMenu{}, id).Error
+	ctx, span := d.tracer().Start(ctx, "AdminMenuDAO.Delete")
+	defer span.End()
+	if err := d.DB.WithContext(ctx).Delete(&model.AdminMenu{}, id).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("delete menu id=%d: %w", id, err)
+	}
+	return nil
 }
 func (d *AdminMenuDAO) UpdateShow(ctx context.Context, id int64, show int) error {
-	return d.DB.WithContext(ctx).Model(&model.AdminMenu{}).Where("id=?", id).Update("show", show).Error
+	ctx, span := d.tracer().Start(ctx, "AdminMenuDAO.UpdateShow")
+	defer span.End()
+	if err := d.DB.WithContext(ctx).Model(&model.AdminMenu{}).Where("id=?", id).Update("show", show).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("update show id=%d: %w", id, err)
+	}
+	return nil
 }
 
 // BuildTree 构建树结构

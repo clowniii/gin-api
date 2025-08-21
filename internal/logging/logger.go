@@ -29,36 +29,20 @@ func New(level, format string) (*Logger, error) {
 	return &Logger{lg}, nil
 }
 
-// 简化 main 中调用
-func (l *Logger) Info(msg string, fields ...interface{}) {
-	fs := make([]zap.Field, 0, len(fields))
-	for i := 0; i < len(fields); i++ {
-		if f, ok := fields[i].(interface {
-			Key() string
-			Value() interface{}
-		}); ok {
-			fs = append(fs, zap.Any(f.Key(), f.Value()))
-		}
-	}
-	l.Logger.Info(msg, fs...)
+// Info 直接接受 zap.Field，避免 interface{} 误传
+func (l *Logger) Info(msg string, fields ...zap.Field) {
+	l.Logger.Info(msg, fields...)
 }
 
-func (l *Logger) Error(msg string, fields ...interface{}) {
-	fs := make([]zap.Field, 0, len(fields))
-	for i := 0; i < len(fields); i++ {
-		if f, ok := fields[i].(interface {
-			Key() string
-			Value() interface{}
-		}); ok {
-			fs = append(fs, zap.Any(f.Key(), f.Value()))
-		}
-	}
-	l.Logger.Error(msg, fs...)
+// Error 直接接受 zap.Field
+func (l *Logger) Error(msg string, fields ...zap.Field) {
+	l.Logger.Error(msg, fields...)
 }
 
-func (l *Logger) WithContext(ctx context.Context) *zap.Logger {
+// WithContext 依据上下文注入 trace_id / user_id 字段，返回新的 *Logger（链式）
+func (l *Logger) WithContext(ctx context.Context) *Logger {
 	if ctx == nil {
-		return l.Logger
+		return l
 	}
 	fields := make([]zap.Field, 0, 2)
 	if v := ctx.Value("trace_id"); v != nil {
@@ -72,7 +56,20 @@ func (l *Logger) WithContext(ctx context.Context) *zap.Logger {
 		}
 	}
 	if len(fields) == 0 {
-		return l.Logger
+		return l
 	}
-	return l.Logger.With(fields...)
+	return &Logger{l.Logger.With(fields...)}
 }
+
+// FromContext 辅助：若 ctx 中已经通过中间件放置 *Logger 则直接返回
+func FromContext(ctx context.Context) *Logger {
+	if ctx == nil {
+		return nil
+	}
+	if lg, ok := ctx.Value(loggerKey{}).(*Logger); ok {
+		return lg
+	}
+	return nil
+}
+
+type loggerKey struct{}
