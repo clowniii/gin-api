@@ -54,7 +54,7 @@
 - 统一缓存接口：`cache.Cache` + LayeredCache (L1 本地 + L2 Redis) 自动注入各服务。
 - 可观测性：Trace (OpenTelemetry)、Metrics (Prometheus)、操作日志 (Kafka) 三合一。
 - 安全：JWT 登录、权限预加载与校验、Wiki 独立鉴权 Header（ApiAuth / Api-Auth）。
-- 兼容：保留原有 PHP 风格路由及响应格式，新增扩展接口不破坏旧前端。
+- 兼容：保留原有 PHP风格路由及响应格式，新增扩展接口不破坏旧前端。
 - 配置化：`config.Config` 覆盖 App 元信息、数据源、凭证、Wiki 超时时间等。
 - 插件式服务装配：通过 Google Wire 生成 `wire_gen.go`，统一在 `InitApp` 入口装载。
 - 错误码统一枚举：`retcode` 包；`/wiki/errorCode` 提供可视化枚举列表。
@@ -231,6 +231,47 @@ cache:
 - 消费：下游服务可读取 header 继续 `context` 链接 Trace。
 - 优点：实现跨进程链路追踪，统一观测平台可以串联 HTTP → Kafka → 消费者。
 
+### HTTP 访问日志异步批量发送 (AccessKafkaAsync)
+为降低每次 HTTP 请求同步写 Kafka 的延迟与系统抖动，引入有界内存队列 + 多 worker + 批量聚合策略：
+1. 入队：中间件在请求结束后构造访问日志 JSON，非阻塞尝试写入有界 channel，队列满即丢弃并计数（避免反压拖垮请求）。
+2. 聚合：worker 自旋从队列取消息，满足 (a) 消息数达到 `max_msgs` 或 (b) 等待时间达到 `max_wait_ms` 之一即触发 flush。
+3. Flush：当前实现按消息逐条调用 Producer 发送（后续任务将优化为单次 `WriteMessages` 批量发送）。
+4. 优雅关闭：应用关闭时调用 `AccessAsyncSender.Close()` 触发 `shutdown` 原因 flush，尽量清空批次。
+5. Trace 透传：若请求上下文存在 trace_id，则注入 Kafka header（亦可在消息体中保留）。
+
+配置块（`log.access_kafka_async`）：
+```yaml
+log:
+  access_kafka: true            # 主开关：是否启用访问日志写 Kafka（同步或异步）
+  access_kafka_async:
+    enable: false               # 是否启用异步批量（false 时走同步逐条 Producer）
+    queue_size: 10000           # 有界队列长度，建议根据 QPS * 峰值延迟预算估算
+    workers: 2                  # 并发 flush worker 数（典型为 CPU 核数的 1~2 倍/或 Kafka 分区数）
+    batch:
+      max_msgs: 50              # 单批最大消息数
+      max_wait_ms: 20           # 首条入批后最大聚合等待时间
+```
+
+指标（Prometheus）：
+| 指标 | 类型 | 说明 | 关键 Label |
+|------|------|------|-----------|
+| `http_access_kafka_enqueue_total` | Counter | 入队结果计数 | result=ok|dropped |
+| `http_access_kafka_queue_depth` | Gauge | 当前队列深度 | - |
+| `http_access_kafka_send_duration_seconds` | Histogram | 每次批量 flush 的发送耗时（当前实现为逐条循环发送总耗时） | - |
+| `http_access_kafka_errors_total` | Counter | 发送错误累计 | - |
+| `http_access_kafka_batch_flush_total` | Counter | 批量 flush 次数 | reason=size|timeout|shutdown |
+| `http_access_kafka_batch_size` | Histogram | 每次 flush 含消息数 | - |
+
+调试：`/debug/peek_access/:<ms>` 可从 Kafka 临时消费一条（需 log.level=debug）。返回 headers 中的 traceparent 可用于链路还原。
+
+Roadmap（后续任务 - 已立项）：
+- Flush 原因耗时拆分（按 size/timeout/shutdown 标签）。
+- 批量发送整合（单次 `WriteMessages` 减少 RTT）。
+- 内存复用与 GC 减压（`sync.Pool`）。
+- 队列滞留时间观测（入队→flush 延迟）。
+- 自适应降级（连续错误切文件落盘）。
+- Stats Debug 端点（实时观察队列状态）。
+
 ---
 ## 开发工作流建议
 1. 修改或新增 Service → 添加 provider → `go generate ./...`
@@ -309,6 +350,4 @@ A: 确认使用登录返回的 `ApiAuth` header，并在在线时长内。
 - 监控完善
 - 更多缓存策略
 - DevOps 流水线 / Helm Chart 部署
-
----
 

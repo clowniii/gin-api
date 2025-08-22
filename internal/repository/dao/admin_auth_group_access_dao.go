@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"go-apiadmin/internal/domain/model"
+	"strconv"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -26,13 +27,22 @@ func (d *AdminAuthGroupAccessDAO) tracer() trace.Tracer {
 func (d *AdminAuthGroupAccessDAO) ListGroupIDsByUser(ctx context.Context, uid int64) ([]int64, error) {
 	ctx, span := d.tracer().Start(ctx, "AdminAuthGroupAccessDAO.ListGroupIDsByUser")
 	defer span.End()
-	var list []int64
-	if err := d.DB.WithContext(ctx).Model(&model.AdminAuthGroupAccess{}).Where("uid = ?", uid).Pluck("group_id", &list).Error; err != nil {
+	var raw []string
+	if err := d.DB.WithContext(ctx).Model(&model.AdminAuthGroupAccess{}).Where("uid = ?", uid).Pluck("group_id", &raw).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("list group ids by user uid=%d: %w", uid, err)
 	}
-	return list, nil
+	res := make([]int64, 0, len(raw))
+	for _, s := range raw {
+		if s == "" { // skip empty
+			continue
+		}
+		if id, err := strconv.ParseInt(s, 10, 64); err == nil {
+			res = append(res, id)
+		}
+	}
+	return res, nil
 }
 
 // ListGroupIDsByUsers bulk load relations for multiple users.
@@ -50,7 +60,12 @@ func (d *AdminAuthGroupAccessDAO) ListGroupIDsByUsers(ctx context.Context, uids 
 		return nil, fmt.Errorf("list group ids by users: %w", err)
 	}
 	for _, r := range rows {
-		res[r.UID] = append(res[r.UID], r.GroupID)
+		if r.GroupID == "" {
+			continue
+		}
+		if gid, err := strconv.ParseInt(r.GroupID, 10, 64); err == nil {
+			res[r.UID] = append(res[r.UID], gid)
+		}
 	}
 	return res, nil
 }
@@ -60,7 +75,8 @@ func (d *AdminAuthGroupAccessDAO) ListUserIDsByGroup(ctx context.Context, gid in
 	ctx, span := d.tracer().Start(ctx, "AdminAuthGroupAccessDAO.ListUserIDsByGroup")
 	defer span.End()
 	var list []int64
-	if err := d.DB.WithContext(ctx).Model(&model.AdminAuthGroupAccess{}).Where("group_id = ?", gid).Pluck("uid", &list).Error; err != nil {
+	gidStr := strconv.FormatInt(gid, 10)
+	if err := d.DB.WithContext(ctx).Model(&model.AdminAuthGroupAccess{}).Where("group_id = ?", gidStr).Pluck("uid", &list).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("list user ids by group gid=%d: %w", gid, err)
@@ -85,7 +101,7 @@ func (d *AdminAuthGroupAccessDAO) ReplaceUserGroups(ctx context.Context, tx *gor
 	}
 	rows := make([]model.AdminAuthGroupAccess, 0, len(groupIDs))
 	for _, gid := range groupIDs {
-		rows = append(rows, model.AdminAuthGroupAccess{UID: uid, GroupID: gid})
+		rows = append(rows, model.AdminAuthGroupAccess{UID: uid, GroupID: strconv.FormatInt(gid, 10)})
 	}
 	if err := tx.WithContext(ctx).Create(&rows).Error; err != nil {
 		span.RecordError(err)
@@ -99,7 +115,8 @@ func (d *AdminAuthGroupAccessDAO) ReplaceUserGroups(ctx context.Context, tx *gor
 func (d *AdminAuthGroupAccessDAO) DeleteMember(ctx context.Context, gid, uid int64) error {
 	ctx, span := d.tracer().Start(ctx, "AdminAuthGroupAccessDAO.DeleteMember")
 	defer span.End()
-	if err := d.DB.WithContext(ctx).Where("group_id = ? AND uid = ?", gid, uid).Delete(&model.AdminAuthGroupAccess{}).Error; err != nil {
+	gidStr := strconv.FormatInt(gid, 10)
+	if err := d.DB.WithContext(ctx).Where("group_id = ? AND uid = ?", gidStr, uid).Delete(&model.AdminAuthGroupAccess{}).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("delete member gid=%d uid=%d: %w", gid, uid, err)
@@ -112,7 +129,8 @@ func (d *AdminAuthGroupAccessDAO) ListMembers(ctx context.Context, gid int64) ([
 	ctx, span := d.tracer().Start(ctx, "AdminAuthGroupAccessDAO.ListMembers")
 	defer span.End()
 	var rows []model.AdminAuthGroupAccess
-	if err := d.DB.WithContext(ctx).Where("group_id = ?", gid).Find(&rows).Error; err != nil {
+	gidStr := strconv.FormatInt(gid, 10)
+	if err := d.DB.WithContext(ctx).Where("group_id = ?", gidStr).Find(&rows).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("list members gid=%d: %w", gid, err)

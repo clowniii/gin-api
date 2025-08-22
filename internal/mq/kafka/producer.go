@@ -92,3 +92,18 @@ func (p *Producer) SendWithHeaders(ctx context.Context, key, value []byte, heade
 }
 
 func (p *Producer) Close() error { return p.Writer.Close() }
+
+// AsyncMessage 用于访问日志异步发送内部结构
+// 仅在 observability AccessLogKafka 中使用
+// key 可为 nil
+// headers 可为 nil
+// value 必须是已经序列化好的字节
+// traceCtx 保留上游 context 的关键 trace 信息，可直接传入 Send/SendWithHeaders
+// 这里不复制 large slice，调用方构建后即不可再修改 value
+type AsyncMessage struct {
+	Ctx       context.Context
+	Key       []byte
+	Value     []byte
+	Headers   map[string]string
+	EnqueueAt time.Time // 入队时间 (由 Enqueue 自动填充)，用于 flush 滞留时延统计
+}

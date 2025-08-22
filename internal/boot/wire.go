@@ -23,8 +23,8 @@ import (
 func ProvideConfig(path string) (*config.Config, error) { return config.Load(path) }
 
 // ProvideRouter 装配路由；这里为注入后的 service 提供。
-func ProvideRouter(j *jwtsec.Manager, l *logging.Logger, p *kafka.Producer, db *gorm.DB, r *redisrepo.Client, a *service.AuthService, u *service.UserService, perm *service.PermissionService, menu *service.MenuService, ag *service.AuthGroupService, ar *service.AuthRuleService, app *service.AppService, appg *service.AppGroupService, ifg *service.InterfaceGroupService, ifl *service.InterfaceListService, fields *service.FieldsService, logSvc *service.LogService, e *etcd.Client, c *config.Config, wiki *service.WikiService) *gin.Engine {
-	return httpSrv.NewRouter(j, l, p, db, r, a, u, perm, menu, ag, ar, app, appg, ifg, ifl, fields, logSvc, e, c, wiki)
+func ProvideRouter(j *jwtsec.Manager, l *logging.Logger, p *kafka.Producer, aks *kafka.AccessAsyncSender, db *gorm.DB, r *redisrepo.Client, a *service.AuthService, u *service.UserService, perm *service.PermissionService, menu *service.MenuService, ag *service.AuthGroupService, ar *service.AuthRuleService, app *service.AppService, appg *service.AppGroupService, ifg *service.InterfaceGroupService, ifl *service.InterfaceListService, fields *service.FieldsService, logSvc *service.LogService, e *etcd.Client, c *config.Config, wiki *service.WikiService) *gin.Engine {
+	return httpSrv.NewRouter(j, l, p, aks, db, r, a, u, perm, menu, ag, ar, app, appg, ifg, ifl, fields, logSvc, e, c, wiki)
 }
 
 func ProvideApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Client, k *kafka.Producer, e *etcd.Client, j *jwtsec.Manager, engine *gin.Engine) *App {
@@ -76,6 +76,7 @@ var ProviderSet = wire.NewSet(
 	NewFieldsServiceDefault,
 	NewLogServiceDefault,
 	NewWikiServiceWithLayered,
+	ProvideAccessAsyncSender,
 	ProvideRouter,
 	ProvideApp,
 )
@@ -116,4 +117,13 @@ func NewInterfaceListServiceWithLayered(d *dao.AdminInterfaceListDAO, c cache.Ca
 }
 func NewPermissionServiceWithLayered(gr *dao.AdminAuthGroupAccessDAO, rule *dao.AdminAuthRuleDAO, u *dao.AdminUserDAO, r *redisrepo.Client, c cache.Cache) *service.PermissionService {
 	return service.NewPermissionServiceWithCache(gr, rule, u, r, c)
+}
+
+func ProvideAccessAsyncSender(c *config.Config, p *kafka.Producer, l *logging.Logger) *kafka.AccessAsyncSender {
+	if !c.Log.AccessKafka || !c.Log.AccessKafkaAsync.Enable {
+		return nil
+	}
+	aks := kafka.NewAccessAsyncSender(p, l, c.Log.AccessKafkaAsync.QueueSize, c.Log.AccessKafkaAsync.Workers, c.Log.AccessKafkaAsync.Batch.MaxMsgs, time.Duration(c.Log.AccessKafkaAsync.Batch.MaxWaitMS)*time.Millisecond)
+	aks.Start()
+	return aks
 }

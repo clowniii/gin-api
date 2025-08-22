@@ -34,7 +34,7 @@ func InitApp(configPath string) (*App, error) {
 	}
 	manager := NewJWTManager(config)
 	adminUserDAO := dao.NewAdminUserDAO(db)
-	authService := service.NewAuthService(adminUserDAO, manager, client)
+	authService := service.NewAuthService(adminUserDAO, manager, client, config)
 	adminAuthGroupDAO := dao.NewAdminAuthGroupDAO(db)
 	adminAuthGroupAccessDAO := dao.NewAdminAuthGroupAccessDAO(db)
 	cache := ProvideLayeredCache(client)
@@ -59,7 +59,9 @@ func InitApp(configPath string) (*App, error) {
 	logService := NewLogServiceDefault(adminUserActionDAO)
 	adminGroupDAO := dao.NewAdminGroupDAO(db)
 	wikiService := NewWikiServiceWithLayered(adminAppDAO, adminGroupDAO, adminInterfaceListDAO, adminFieldsDAO, cache)
-	engine := ProvideRouter(manager, logger, producer, db, client, authService, userService, permissionService, menuService, authGroupService, authRuleService, appService, appGroupService, interfaceGroupService, interfaceListService, fieldsService, logService, etcdClient, config, wikiService)
+	accessAsyncSender := ProvideAccessAsyncSender(config, producer, logger)
+	engine := ProvideRouter(manager, logger, producer, accessAsyncSender, db, client, authService, userService, permissionService, menuService, authGroupService, authRuleService, appService, appGroupService, interfaceGroupService, interfaceListService, fieldsService, logService, etcdClient, config, wikiService)
 	app := ProvideApp(config, logger, db, client, producer, etcdClient, manager, engine)
+	app.AsyncAccessSender = accessAsyncSender
 	return app, nil
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	adminh "go-apiadmin/internal/server/http/handler/admin"
+	debugh "go-apiadmin/internal/server/http/handler/debug"
 	wikih "go-apiadmin/internal/server/http/handler/wiki"
 )
 
@@ -22,10 +23,11 @@ type HandlerSet struct {
 	Cache          *adminh.CacheHandler
 	Index          *adminh.IndexHandler
 	Wiki           *wikih.WikiHandler
+	Debug          *debugh.Handler
 }
 
 // NewHandlerSet 创建聚合。参数为子包依赖（各自最小依赖集）。
-func NewHandlerSet(ad adminh.Dependencies, wd wikih.Dependencies) *HandlerSet {
+func NewHandlerSet(ad adminh.Dependencies, wd wikih.Dependencies, dbg debugh.Dependencies) *HandlerSet {
 	return &HandlerSet{
 		Auth:           adminh.NewAuthHandler(ad),
 		User:           adminh.NewUserHandler(ad),
@@ -41,5 +43,6 @@ func NewHandlerSet(ad adminh.Dependencies, wd wikih.Dependencies) *HandlerSet {
 		Cache:          adminh.NewCacheHandler(ad),
 		Index:          adminh.NewIndexHandler(ad),
 		Wiki:           wikih.NewWikiHandler(wd),
+		Debug:          debugh.New(dbg),
 	}
 }

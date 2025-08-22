@@ -96,7 +96,8 @@ func (s *MenuService) List(ctx context.Context, keywords string) (*ListMenuResul
 type AddMenuParams struct {
 	Fid                                 int64
 	Title, Icon, URL, Router, Component string
-	Sort, Show, Level                   int
+	Sort                                int
+	Show, Level                         int8
 }
 
 func (s *MenuService) Add(ctx context.Context, p AddMenuParams) error {
@@ -117,7 +118,8 @@ type EditMenuParams struct {
 	ID                                  int64
 	Fid                                 *int64
 	Title, Icon, URL, Router, Component *string
-	Sort, Show, Level                   *int
+	Sort                                *int
+	Show, Level                         *int8
 }
 
 func (s *MenuService) Edit(ctx context.Context, p EditMenuParams) error {
@@ -180,9 +182,14 @@ func (s *MenuService) Edit(ctx context.Context, p EditMenuParams) error {
 }
 
 func (s *MenuService) ChangeStatus(ctx context.Context, id int64, show int) error {
+	// show 参数外部仍可能传 int，这里转换
+	return s.changeStatusInt8(ctx, id, int8(show))
+}
+
+func (s *MenuService) changeStatusInt8(ctx context.Context, id int64, show int8) error {
 	ctx, span := s.tracer().Start(ctx, "MenuService.ChangeStatus")
 	defer span.End()
-	err := s.DAO.UpdateShow(ctx, id, show)
+	err := s.DAO.UpdateShow(ctx, id, int(show))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -294,7 +301,7 @@ func (s *MenuService) maybeCleanup(now int64) {
 				}{uid: uid, ts: ts})
 			}
 		}
-		// 简易 O(n^2) 插入排序（数量有限），避免引入新依赖
+		// 简单的 O(n^2) 插入排序（数量有限），避免引入新依赖
 		for i := 1; i < len(remain); i++ {
 			j := i
 			for j > 0 && remain[j].ts < remain[j-1].ts {

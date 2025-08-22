@@ -1,14 +1,13 @@
 package model
 
-// AdminAuthGroupAccess 用户与权限组关系
-// group_id 原为字符串(存多组ID)，这里规范化为一行一条关系，需后续迁移脚本拆分
-// 如果保持兼容，可先保留原结构；此处采用规范化: user_id, group_id
-// 若需兼容旧库(单行存多个ID)，后续添加自定义加载逻辑。
+// AdminAuthGroupAccess 用户与权限组关系 (兼容旧结构)
+// group_id 保持为字符串(varchar(255))，旧库里可能存多个组ID（分隔符需按历史实现解析）
+// 后续若做规范化拆分，可新增迁移脚本创建关系表并替换业务读取逻辑。
 
 type AdminAuthGroupAccess struct {
-	ID      int64 `gorm:"primaryKey" json:"id"`
-	UID     int64 `gorm:"column:uid" json:"uid"`
-	GroupID int64 `gorm:"column:group_id" json:"group_id"`
+	ID      int64  `gorm:"primaryKey;column:id" json:"id"`
+	UID     int64  `gorm:"column:uid;index" json:"uid"`
+	GroupID string `gorm:"column:group_id;size:255;index" json:"group_id"`
 }
 
 func (AdminAuthGroupAccess) TableName() string { return "admin_auth_group_access" }

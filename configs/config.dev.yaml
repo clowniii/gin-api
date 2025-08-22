@@ -1,15 +1,19 @@
 http:
   addr: ":8080"
 postgres:
-  dsn: "postgres://admin:zhou123456@192.168.5.130:5432/apiadmin?sslmode=disable"
+  dsn: "postgres://admin:zhou123456@192.168.5.130:5432/postgres?sslmode=disable"
   max_open: 50
   max_idle: 10
-  auto_migrate: true
+  auto_migrate: false
 redis:
-  addr: "192.168.3.230:6379"
+  addr: "192.168.5.1:6379"
   password: ""
   db: 0
   jti_prefix: "jwt:jti:"
+  dial_timeout_ms: 800
+  read_timeout_ms: 500
+  write_timeout_ms: 500
+  ping_timeout_ms: 500
 kafka:
   brokers: ["192.168.5.130:9092"]
   op_log_topic: "admin_op_log"
@@ -20,12 +24,24 @@ jwt:
   secret: "kdljfljffjghieutgjfjkfg8873274923847nfkfsbfryfy78fw84"
   expire_seconds: 7200
   issuer: "GOAPIAdmin"
+auth:
+  session_ttl_seconds: 300   # 会话缓存 TTL（秒）
+  rotate_refresh: true       # refresh 时旋转 refresh token
 log:
   level: "debug"
   format: "json"
+  access_kafka: true
+  access_kafka_async:
+    enable: true
+    queue_size: 20000
+    workers: 4
+    batch:
+      max_msgs: 100
+      max_wait_ms: 50
 app_meta:
   name: "GOAPIAdmin"
   version: "1.0"
+  env: "dev"  # 新增: 运行环境 dev|staging|prod
 wiki:
   online_time_seconds: 86400
 upload:

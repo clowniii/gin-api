@@ -23,9 +23,18 @@ jwt:
 log:
   level: "debug"
   format: "json"
+  access_kafka: false  # 是否将 http_access 基础请求日志发送到 Kafka (op_log_topic)
+  access_kafka_async:  # 异步+批量发送配置
+    enable: false      # 开启后 AccessLogKafka 走内存队列+批量 flush
+    queue_size: 10000  # 有界队列大小，满则丢弃并计数
+    workers: 2         # 并发 flush worker 数
+    batch:
+      max_msgs: 50     # 单批最大消息数 (>=1)
+      max_wait_ms: 20  # 最长聚合等待毫秒 (>=1)
 app_meta:
   name: "GOAPIAdmin"
   version: "1.0"
+  env: "dev"  # 新增: 运行环境 dev|staging|prod
 wiki:
   online_time_seconds: 86400
 upload:

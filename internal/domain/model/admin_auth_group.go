@@ -1,7 +1,6 @@
 package model
 
 // AdminAuthGroup 对应 admin_auth_group
-// status: 1 正常 0 禁用
 
 type AdminAuthGroup struct {
 	ID          int64  `gorm:"primaryKey" json:"id"`

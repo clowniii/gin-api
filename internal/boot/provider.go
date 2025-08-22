@@ -2,6 +2,7 @@ package boot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"go-apiadmin/internal/config"
 	"go-apiadmin/internal/discovery/etcd"
@@ -11,6 +12,7 @@ import (
 	"go-apiadmin/internal/repository/postgres"
 	redisrepo "go-apiadmin/internal/repository/redis"
 	"go-apiadmin/internal/security/jwt"
+	"net"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
@@ -50,6 +53,8 @@ type App struct {
 	JWT    *jwt.Manager
 	HTTP   *gin.Engine
 
+	AsyncAccessSender *kafka.AccessAsyncSender
+
 	serviceKey string
 	leaseID    clientv3.LeaseID
 	tracerProv *trace.TracerProvider
@@ -61,7 +66,12 @@ func NewPostgres(c *config.Config) (*gorm.DB, error) {
 }
 
 func NewRedis(c *config.Config) *redisrepo.Client {
-	return redisrepo.New(redisrepo.Config{Addr: c.Redis.Addr, Password: c.Redis.Password, DB: c.Redis.DB})
+	return redisrepo.New(redisrepo.Config{Addr: c.Redis.Addr, Password: c.Redis.Password, DB: c.Redis.DB,
+		DialTimeout:  time.Duration(c.Redis.DialTimeoutMS) * time.Millisecond,
+		ReadTimeout:  time.Duration(c.Redis.ReadTimeoutMS) * time.Millisecond,
+		WriteTimeout: time.Duration(c.Redis.WriteTimeoutMS) * time.Millisecond,
+		PingTimeout:  time.Duration(c.Redis.PingTimeoutMS) * time.Millisecond,
+	})
 }
 
 func NewKafkaProducer(c *config.Config) *kafka.Producer {
@@ -92,19 +102,65 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 			&model.AdminMenu{},
 			&model.AdminApp{},
 			&model.AdminAppGroup{},
+			&model.AdminGroup{}, // 新增：admin_group 表
 			&model.AdminInterfaceGroup{},
 			&model.AdminInterfaceList{},
 			&model.AdminField{},
+			&model.AdminUserData{},
 		); err != nil {
 			l.Error("auto_migrate_failed", zap.Error(err))
 		}
 	}
 	app := &App{Config: c, Logger: l, DB: db, Redis: r, Kafka: k, Etcd: e, JWT: j, HTTP: engine}
+	// Redis 启动健康检查（避免登录慢才暴露问题）
+	if r != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.Redis.PingTimeoutMS)*time.Millisecond)
+		defer cancel()
+		if err := r.Ping(ctx); err != nil {
+			l.Error("redis_ping_failed", zap.Error(err), zap.String("addr", c.Redis.Addr))
+		} else {
+			l.Info("redis_ping_ok", zap.String("addr", c.Redis.Addr))
+		}
+	}
 	if e != nil && len(c.Etcd.Endpoints) > 0 {
 		go func() {
 			ctx := context.Background()
-			serviceKey := fmt.Sprintf("/services/apiadmin/%s/%s", c.AppMeta.Version, c.HTTP.Addr)
-			val := fmt.Sprintf("{\"addr\":\"%s\",\"version\":\"%s\"}", c.HTTP.Addr, c.AppMeta.Version)
+			// 生成 instance_id
+			instanceID := uuid.New().String()
+			// 解析监听地址端口，尝试获取本机首个非 loopback IPv4
+			addrPort := c.HTTP.Addr
+			if addrPort == "" {
+				addrPort = ":8080"
+			}
+			// 分离端口
+			port := ""
+			if addrPort[0] == ':' { // 形如 :8080
+				port = addrPort[1:]
+			} else {
+				// 可能是 0.0.0.0:8080 或 127.0.0.1:8080
+				if host, p, err := net.SplitHostPort(addrPort); err == nil {
+					port = p
+					if host != "" && host != "0.0.0.0" && host != "::" { // 明确 host
+						// 保留, 后续 ip 使用 host
+					}
+				}
+			}
+			ip := firstNonLoopbackIPv4()
+			if ip == "" {
+				ip = "127.0.0.1"
+			}
+			serviceKey := fmt.Sprintf("/services/apiadmin/%s/%s/%s", c.AppMeta.Env, c.AppMeta.Version, instanceID)
+			meta := map[string]interface{}{
+				"instance_id":  instanceID,
+				"env":          c.AppMeta.Env,
+				"version":      c.AppMeta.Version,
+				"ip":           ip,
+				"port":         port,
+				"addr":         c.HTTP.Addr,
+				"startup_unix": time.Now().Unix(),
+			}
+			valBytes, _ := json.Marshal(meta)
+			val := string(valBytes)
 			// 指数退避重试注册
 			var (
 				attempt     = 0
@@ -213,4 +269,45 @@ func (a *App) Close() {
 			a.Logger.Error("otel_tracer_shutdown_error", zap.Error(err))
 		}
 	}
+	// 异步访问日志发送器关闭（若存在）
+	if a.AsyncAccessSender != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = a.AsyncAccessSender.Close(ctx)
+	}
+}
+
+// 获取首个非 loopback IPv4
+func firstNonLoopbackIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil {
+				continue
+			}
+			return ip.String()
+		}
+	}
+	return ""
 }

@@ -7,7 +7,7 @@ package model
 type AdminUserAction struct {
 	ID         int64  `gorm:"primaryKey" json:"id"`
 	ActionName string `gorm:"column:action_name;size:50" json:"action_name"`
-	UID        int64  `gorm:"column:uid" json:"uid"`
+	UID        int64  `gorm:"column:uid;index" json:"uid"`
 	Nickname   string `gorm:"column:nickname;size:50" json:"nickname"`
 	AddTime    int64  `gorm:"column:add_time" json:"add_time"`
 	Data       string `gorm:"column:data" json:"data"`

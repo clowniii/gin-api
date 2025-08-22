@@ -76,6 +76,52 @@ func (p *PermissionService) GetUserPermissions(ctx context.Context, uid int64) (
 	ctx, span := p.tracer().Start(ctx, "PermissionService.GetUserPermissions", trace.WithAttributes())
 	defer span.End()
 	if p.Cache != nil { // 统一缓存路径
+		// 超级管理员直接授予全部启用权限（status=1），并缓存
+		if uid == 1 {
+			fmt.Println("super admin permissions requested")
+			key := p.redisKey(uid)
+			fmt.Println("Checking cache for super admin permissions:", key)
+			if v, _ := p.Cache.Get(ctx, key); v != "" { // 复用同一 key
+				if cache.IsNilSentinel(v) { // 不会出现，但保持语义
+					atomic.AddUint64(&p.metricUnifiedHit, 1)
+					return map[string]struct{}{}, nil
+				}
+				var arr []string
+				if json.Unmarshal([]byte(v), &arr) == nil && len(arr) > 0 { // 命中
+					set := make(map[string]struct{}, len(arr))
+					for _, s := range arr {
+						set[s] = struct{}{}
+					}
+					atomic.AddUint64(&p.metricUnifiedHit, 1)
+					return set, nil
+				}
+			}
+			fmt.Println("Cache miss for super admin permissions, loading from DB")
+			// miss -> 加载全部规则
+			rules, err := p.Rules.List(ctx, nil)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				return nil, fmt.Errorf("list all rules for super admin: %w", err)
+			}
+			set := make(map[string]struct{}, len(rules))
+			arr := make([]string, 0, len(rules))
+			for _, r := range rules {
+				if r.Status != 1 {
+					continue
+				}
+				keyURL := strings.ToLower(r.URL)
+				set[keyURL] = struct{}{}
+				arr = append(arr, keyURL)
+			}
+			if len(arr) == 0 { // 空也写入 sentinel 避免穿透
+				p.setCacheWithTTL(ctx, key, cache.WrapNil(true), 30*time.Second)
+			} else if b, err := json.Marshal(arr); err == nil {
+				p.setCacheWithTTL(ctx, key, string(b), p.ttl)
+			}
+			atomic.AddUint64(&p.metricDBLoad, 1)
+			return set, nil
+		}
 		key := p.redisKey(uid)
 		if v, _ := p.Cache.Get(ctx, key); v != "" {
 			if cache.IsNilSentinel(v) { // 空占位
@@ -125,6 +171,24 @@ func (p *PermissionService) GetUserPermissions(ctx context.Context, uid int64) (
 	}
 
 	// ===== 旧实现 (本地 map + Redis) 保留兼容 =====
+	// 超级管理员: 直接加载全部启用规则
+	if uid == 1 {
+		rules, err := p.Rules.List(ctx, nil)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("list all rules for super admin (legacy path): %w", err)
+		}
+		set := make(map[string]struct{}, len(rules))
+		for _, r := range rules {
+			if r.Status != 1 {
+				continue
+			}
+			set[strings.ToLower(r.URL)] = struct{}{}
+		}
+		atomic.AddUint64(&p.metricDBLoad, 1)
+		return set, nil
+	}
 	// 1. 进程内缓存 (不做 sentinel，这里仅适用非空结果缓存)
 	p.cacheMux.RLock()
 	item, ok := p.cache[uid]

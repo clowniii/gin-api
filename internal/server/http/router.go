@@ -12,6 +12,7 @@ import (
 	"go-apiadmin/internal/security/jwt"
 	handlerset "go-apiadmin/internal/server/http/handler"
 	adm "go-apiadmin/internal/server/http/handler/admin"
+	debugh "go-apiadmin/internal/server/http/handler/debug"
 	wikih "go-apiadmin/internal/server/http/handler/wiki"
 	"go-apiadmin/internal/server/http/middleware" // keep for ResponseWrapper, CORS
 	obs "go-apiadmin/internal/server/http/middleware/observability"
@@ -24,10 +25,19 @@ import (
 )
 
 // NewRouter 仅负责分组与中间件装配，具体业务放在 handler 层
-func NewRouter(jwtm *jwt.Manager, logger *logging.Logger, producer *kafka.Producer, db *gorm.DB, redis *redisrepo.Client, authSvc *service.AuthService, userSvc *service.UserService, permSvc *service.PermissionService, menuSvc *service.MenuService, authGroupSvc *service.AuthGroupService, authRuleSvc *service.AuthRuleService, appSvc *service.AppService, appGroupSvc *service.AppGroupService, ifgSvc *service.InterfaceGroupService, iflSvc *service.InterfaceListService, fieldsSvc *service.FieldsService, logSvc *service.LogService, etcdCli *etcd.Client, cfg *config.Config, wikiSvc *service.WikiService) *gin.Engine {
+func NewRouter(jwtm *jwt.Manager, logger *logging.Logger, producer *kafka.Producer, asyncSender *kafka.AccessAsyncSender, db *gorm.DB, redis *redisrepo.Client, authSvc *service.AuthService, userSvc *service.UserService, permSvc *service.PermissionService, menuSvc *service.MenuService, authGroupSvc *service.AuthGroupService, authRuleSvc *service.AuthRuleService, appSvc *service.AppService, appGroupSvc *service.AppGroupService, ifgSvc *service.InterfaceGroupService, iflSvc *service.InterfaceListService, fieldsSvc *service.FieldsService, logSvc *service.LogService, etcdCli *etcd.Client, cfg *config.Config, wikiSvc *service.WikiService) *gin.Engine {
 	r := gin.New()
-	// 新增 ConfigInjector 放最前确保后续中间件可读取 app_config
-	r.Use(middleware.ConfigInjector(cfg), gin.Recovery(), middleware.CORS(), obs.TraceMiddleware(), obs.LoggerContextMiddleware(logger), middleware.ResponseWrapper(), obs.Metrics())
+	// 基础中间件链
+	chain := []gin.HandlerFunc{middleware.ConfigInjector(cfg), gin.Recovery(), middleware.CORS(), obs.TraceMiddleware(), obs.LoggerContextMiddleware(logger), middleware.ResponseWrapper(), obs.AccessLog(logger)}
+	if cfg.Log.AccessKafka {
+		if cfg.Log.AccessKafkaAsync.Enable && asyncSender != nil {
+			chain = append(chain, obs.AccessLogKafkaAsync(logger, asyncSender))
+		} else {
+			chain = append(chain, obs.AccessLogKafka(logger, producer))
+		}
+	}
+	chain = append(chain, obs.Metrics())
+	r.Use(chain...)
 
 	// 健康检查
 	hc := NewHealthChecker(db, redis, producer, etcdCli)
@@ -46,14 +56,21 @@ func NewRouter(jwtm *jwt.Manager, logger *logging.Logger, producer *kafka.Produc
 	// Prometheus
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// 依赖注入给 handler 构造器 (拆分 admin / wiki 子包依赖)
+	// 依赖注入给 handler 构造器 (拆分 admin / wiki / debug 子包依赖)
 	ad := adm.Dependencies{
 		Auth: authSvc, User: userSvc, Perm: permSvc, Menu: menuSvc, AuthGroup: authGroupSvc, AuthRule: authRuleSvc,
 		App: appSvc, AppGroup: appGroupSvc, IfGroup: ifgSvc, IfList: iflSvc, Fields: fieldsSvc, Log: logSvc,
 		JWT: jwtm, Logger: logger, Producer: producer, Config: cfg, Cache: menuSvc.Cache,
 	}
 	wd := wikih.Dependencies{Wiki: wikiSvc, Config: cfg, Logger: logger, Cache: menuSvc.Cache}
-	h := handlerset.NewHandlerSet(ad, wd)
+	dbgd := debugh.Dependencies{Config: cfg, Logger: logger}
+	h := handlerset.NewHandlerSet(ad, wd, dbgd)
+
+	// Debug routes (仅在 debug 日志级别时开放, 且非生产配置)
+	if cfg.Log.Level == "debug" {
+		debugGrp := r.Group("/debug")
+		debugGrp.GET("/peek_access/:Second", h.Debug.PeekAccessLog)
+	}
 
 	// 登录/公共接口
 	v1 := r.Group("/admin") // 沿用原路径结构 (轻量公共 + 认证接口分组)，不含 OperationLog
@@ -66,11 +83,6 @@ func NewRouter(jwtm *jwt.Manager, logger *logging.Logger, producer *kafka.Produc
 		v1.POST("/Login/logout", h.Auth.Logout)
 		// 兼容新增：GET /admin/Login/logout (原 PHP 为 GET 且需要认证+日志，无权限校验)
 		v1.GET("/Login/logout", sec.Auth(jwtm, logger), obs.OperationLog(producer), h.Auth.Logout)
-		// NOTE: 以下四个 Auth 相关接口已迁入 admin 组以补齐操作日志 (2025-08 重构)
-		// v1.GET("/Auth/delMember", ...)
-		// v1.GET("/Auth/getGroups", ...)
-		// v1.GET("/Auth/getRuleList", ...)
-		// v1.POST("/Auth/editRule", ...)
 	}
 
 	// 需认证+操作日志+权限预加载 (admin 主业务分组)

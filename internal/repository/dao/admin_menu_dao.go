@@ -79,7 +79,7 @@ func (d *AdminMenuDAO) UpdateShow(ctx context.Context, id int64, show int) error
 	return nil
 }
 
-// BuildTree 构建树结构
+// BuildTree 构建树结构（补充 auth/log/permission/method 字段，便于前端与过滤逻辑使用）
 func BuildTree(list []model.AdminMenu) []map[string]interface{} {
 	children := map[int64][]map[string]interface{}{}
 	items := make([]map[string]interface{}, 0, len(list))
@@ -88,6 +88,7 @@ func BuildTree(list []model.AdminMenu) []map[string]interface{} {
 			"id": m.ID, "fid": m.FID, "title": m.Title, "icon": m.Icon,
 			"url": m.URL, "router": m.Router, "component": m.Component,
 			"sort": m.Sort, "show": m.Show, "level": m.Level,
+			"auth": m.Auth, "log": m.Log, "permission": m.Permission, "method": m.Method,
 		}
 		items = append(items, item)
 		children[m.FID] = append(children[m.FID], item)
