@@ -29,6 +29,7 @@ type PermissionService struct {
 	Groups      *dao.AdminAuthGroupAccessDAO
 	Rules       *dao.AdminAuthRuleDAO
 	UserDAO     *dao.AdminUserDAO
+	MenuDAO     *dao.AdminMenuDAO
 	Redis       *redisrepo.Client       // 旧实现中 L2 Redis；保留以兼容旧逻辑
 	cacheMux    sync.RWMutex            // 旧实现 L1 本地 map
 	cache       map[int64]permCacheItem // 旧实现本地 map
@@ -48,14 +49,14 @@ type permCacheItem struct {
 	Set     map[string]struct{}
 }
 
-func NewPermissionService(gr *dao.AdminAuthGroupAccessDAO, rule *dao.AdminAuthRuleDAO, u *dao.AdminUserDAO, r *redisrepo.Client) *PermissionService {
-	return &PermissionService{Groups: gr, Rules: rule, UserDAO: u, Redis: r, cache: make(map[int64]permCacheItem), ttl: 5 * time.Minute, redisPrefix: "perm:user:"}
+func NewPermissionService(gr *dao.AdminAuthGroupAccessDAO, rule *dao.AdminAuthRuleDAO, u *dao.AdminUserDAO, m *dao.AdminMenuDAO, r *redisrepo.Client) *PermissionService {
+	return &PermissionService{Groups: gr, Rules: rule, UserDAO: u, MenuDAO: m, Redis: r, cache: make(map[int64]permCacheItem), ttl: 5 * time.Minute, redisPrefix: "perm:user:"}
 }
 
 // NewPermissionServiceWithCache 使用统一 cache（推荐，支持 LayeredCache）
 // r 仍然可传入以兼容旧逻辑或供其它场景使用；如果不需要可传 nil。
-func NewPermissionServiceWithCache(gr *dao.AdminAuthGroupAccessDAO, rule *dao.AdminAuthRuleDAO, u *dao.AdminUserDAO, r *redisrepo.Client, c cache.Cache) *PermissionService {
-	ps := NewPermissionService(gr, rule, u, r)
+func NewPermissionServiceWithCache(gr *dao.AdminAuthGroupAccessDAO, rule *dao.AdminAuthRuleDAO, u *dao.AdminUserDAO, m *dao.AdminMenuDAO, r *redisrepo.Client, c cache.Cache) *PermissionService {
+	ps := NewPermissionService(gr, rule, u, m, r)
 	ps.Cache = c
 	return ps
 }
@@ -76,18 +77,15 @@ func (p *PermissionService) GetUserPermissions(ctx context.Context, uid int64) (
 	ctx, span := p.tracer().Start(ctx, "PermissionService.GetUserPermissions", trace.WithAttributes())
 	defer span.End()
 	if p.Cache != nil { // 统一缓存路径
-		// 超级管理员直接授予全部启用权限（status=1），并缓存
-		if uid == 1 {
-			fmt.Println("super admin permissions requested")
+		if uid == 1 { // 超级管理员: 直接基于全部菜单 URL 构建权限集合（不受 show 限制）
 			key := p.redisKey(uid)
-			fmt.Println("Checking cache for super admin permissions:", key)
-			if v, _ := p.Cache.Get(ctx, key); v != "" { // 复用同一 key
-				if cache.IsNilSentinel(v) { // 不会出现，但保持语义
+			if v, _ := p.Cache.Get(ctx, key); v != "" { // 尝试命中缓存
+				if cache.IsNilSentinel(v) {
 					atomic.AddUint64(&p.metricUnifiedHit, 1)
 					return map[string]struct{}{}, nil
 				}
 				var arr []string
-				if json.Unmarshal([]byte(v), &arr) == nil && len(arr) > 0 { // 命中
+				if json.Unmarshal([]byte(v), &arr) == nil && len(arr) > 0 {
 					set := make(map[string]struct{}, len(arr))
 					for _, s := range arr {
 						set[s] = struct{}{}
@@ -96,25 +94,24 @@ func (p *PermissionService) GetUserPermissions(ctx context.Context, uid int64) (
 					return set, nil
 				}
 			}
-			fmt.Println("Cache miss for super admin permissions, loading from DB")
-			// miss -> 加载全部规则
-			rules, err := p.Rules.List(ctx, nil)
+			// miss -> 加载全部菜单
+			menus, err := p.MenuDAO.ListMenus(ctx, "")
 			if err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
-				return nil, fmt.Errorf("list all rules for super admin: %w", err)
+				return nil, fmt.Errorf("list all menus for super admin: %w", err)
 			}
-			set := make(map[string]struct{}, len(rules))
-			arr := make([]string, 0, len(rules))
-			for _, r := range rules {
-				if r.Status != 1 {
+			set := make(map[string]struct{}, len(menus))
+			arr := make([]string, 0, len(menus))
+			for _, m := range menus { // 不限 show，完整权限
+				u := strings.ToLower(m.URL)
+				if u == "" { // 跳过空 URL（与旧逻辑保持一致，可按需保留）
 					continue
 				}
-				keyURL := strings.ToLower(r.URL)
-				set[keyURL] = struct{}{}
-				arr = append(arr, keyURL)
+				set[u] = struct{}{}
+				arr = append(arr, u)
 			}
-			if len(arr) == 0 { // 空也写入 sentinel 避免穿透
+			if len(arr) == 0 { // 空 sentinel 防穿透
 				p.setCacheWithTTL(ctx, key, cache.WrapNil(true), 30*time.Second)
 			} else if b, err := json.Marshal(arr); err == nil {
 				p.setCacheWithTTL(ctx, key, string(b), p.ttl)
@@ -122,9 +119,10 @@ func (p *PermissionService) GetUserPermissions(ctx context.Context, uid int64) (
 			atomic.AddUint64(&p.metricDBLoad, 1)
 			return set, nil
 		}
+		// 非超级管理员
 		key := p.redisKey(uid)
 		if v, _ := p.Cache.Get(ctx, key); v != "" {
-			if cache.IsNilSentinel(v) { // 空占位
+			if cache.IsNilSentinel(v) {
 				atomic.AddUint64(&p.metricUnifiedHit, 1)
 				return map[string]struct{}{}, nil
 			}
@@ -138,12 +136,16 @@ func (p *PermissionService) GetUserPermissions(ctx context.Context, uid int64) (
 				return set, nil
 			}
 		}
-		// miss -> DB 回源
+		// miss -> 根据用户组与规则过滤菜单(show=1且规则 URL 集合里)
 		gids, err := p.Groups.ListGroupIDsByUser(ctx, uid)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("get user group ids: %w", err)
+		}
+		if len(gids) == 0 { // 无分组 -> 空权限
+			p.setCacheWithTTL(ctx, key, cache.WrapNil(true), 15*time.Second)
+			return map[string]struct{}{}, nil
 		}
 		rules, err := p.Rules.ListByGroupIDs(ctx, gids)
 		if err != nil {
@@ -151,17 +153,45 @@ func (p *PermissionService) GetUserPermissions(ctx context.Context, uid int64) (
 			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("list rules by group ids: %w", err)
 		}
-		if len(rules) == 0 { // 空结果穿透保护
+		if len(rules) == 0 {
 			p.setCacheWithTTL(ctx, key, cache.WrapNil(true), 15*time.Second)
 			atomic.AddUint64(&p.metricDBLoad, 1)
 			return map[string]struct{}{}, nil
 		}
-		set := make(map[string]struct{}, len(rules))
-		arr := make([]string, 0, len(rules))
+		// 构建规则 URL set
+		ruleSet := make(map[string]struct{}, len(rules))
 		for _, r := range rules {
-			keyURL := strings.ToLower(r.URL)
-			set[keyURL] = struct{}{}
-			arr = append(arr, keyURL)
+			if r.URL == "" { // 空 URL 仍然加入（兼容旧逻辑 access[""]）
+				continue
+			}
+			ruleSet[strings.ToLower(r.URL)] = struct{}{}
+		}
+		// 加载菜单并过滤 show=1 且 URL 在 ruleSet 中
+		menus, err := p.MenuDAO.ListMenus(ctx, "")
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("list menus for user: %w", err)
+		}
+		set := make(map[string]struct{})
+		arr := make([]string, 0)
+		for _, m := range menus {
+			if m.Show != 1 { // 仅显示状态菜单
+				continue
+			}
+			u := strings.ToLower(m.URL)
+			if u == "" { // 空 URL 允许加入一次（与旧逻辑 access[""] = struct{}{} 类似，可选）
+				continue
+			}
+			if _, ok := ruleSet[u]; ok {
+				set[u] = struct{}{}
+				arr = append(arr, u)
+			}
+		}
+		if len(arr) == 0 { // 没有匹配菜单
+			p.setCacheWithTTL(ctx, key, cache.WrapNil(true), 15*time.Second)
+			atomic.AddUint64(&p.metricDBLoad, 1)
+			return map[string]struct{}{}, nil
 		}
 		if b, err := json.Marshal(arr); err == nil {
 			p.setCacheWithTTL(ctx, key, string(b), p.ttl)

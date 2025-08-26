@@ -115,8 +115,8 @@ func NewInterfaceGroupServiceWithLayered(d *dao.AdminInterfaceGroupDAO, c cache.
 func NewInterfaceListServiceWithLayered(d *dao.AdminInterfaceListDAO, c cache.Cache) *service.InterfaceListService {
 	return service.NewInterfaceListServiceWithCache(d, c)
 }
-func NewPermissionServiceWithLayered(gr *dao.AdminAuthGroupAccessDAO, rule *dao.AdminAuthRuleDAO, u *dao.AdminUserDAO, r *redisrepo.Client, c cache.Cache) *service.PermissionService {
-	return service.NewPermissionServiceWithCache(gr, rule, u, r, c)
+func NewPermissionServiceWithLayered(gr *dao.AdminAuthGroupAccessDAO, rule *dao.AdminAuthRuleDAO, u *dao.AdminUserDAO, m *dao.AdminMenuDAO, r *redisrepo.Client, c cache.Cache) *service.PermissionService {
+	return service.NewPermissionServiceWithCache(gr, rule, u, m, r, c)
 }
 
 func ProvideAccessAsyncSender(c *config.Config, p *kafka.Producer, l *logging.Logger) *kafka.AccessAsyncSender {

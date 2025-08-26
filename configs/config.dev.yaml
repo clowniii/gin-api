@@ -14,6 +14,7 @@ redis:
   read_timeout_ms: 500
   write_timeout_ms: 500
   ping_timeout_ms: 500
+  heartbeat_seconds: 10
 kafka:
   brokers: ["192.168.5.130:9092"]
   op_log_topic: "admin_op_log"
@@ -27,6 +28,8 @@ jwt:
 auth:
   session_ttl_seconds: 300   # 会话缓存 TTL（秒）
   rotate_refresh: true       # refresh 时旋转 refresh token
+  login_mode: "multi"       # single=单端登录(挤下线) multi=多端登录
+  max_multi_sessions: 0      # 多端模式下限制最大并发会话数, 0 表示不限制
 log:
   level: "debug"
   format: "json"

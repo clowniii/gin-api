@@ -49,7 +49,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if uid != 1 {
 		menus = filterMenuTree(menus, permSet)
 	}
-	resp := gin.H{"token": access, "refreshToken": refresh, "user": userInfo, "menu": menus, "access": perms, "perms": perms}
+	resp := gin.H{"token": access, "refreshToken": refresh, "user": userInfo, "menu": menus, "access": perms}
 	if h.d.Cache != nil && uid > 0 {
 		b, _ := json.Marshal(resp)
 		ttl := time.Duration(h.d.Config.Auth.SessionTTLSeconds) * time.Second

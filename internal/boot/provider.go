@@ -31,6 +31,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"gorm.io/plugin/opentelemetry/tracing"
+
+	"go-apiadmin/internal/metrics"
 )
 
 type Dependencies struct {
@@ -57,7 +59,9 @@ type App struct {
 
 	serviceKey string
 	leaseID    clientv3.LeaseID
+	serviceVal string // 新增: 缓存首次注册的原始metadata value，供重注册恢复
 	tracerProv *trace.TracerProvider
+	stopCh     chan struct{} // 新增: 心跳协程关闭
 }
 
 // Provider constructors for wire
@@ -111,7 +115,7 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 			l.Error("auto_migrate_failed", zap.Error(err))
 		}
 	}
-	app := &App{Config: c, Logger: l, DB: db, Redis: r, Kafka: k, Etcd: e, JWT: j, HTTP: engine}
+	app := &App{Config: c, Logger: l, DB: db, Redis: r, Kafka: k, Etcd: e, JWT: j, HTTP: engine, stopCh: make(chan struct{})}
 	// Redis 启动健康检查（避免登录慢才暴露问题）
 	if r != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.Redis.PingTimeoutMS)*time.Millisecond)
@@ -121,6 +125,37 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 		} else {
 			l.Info("redis_ping_ok", zap.String("addr", c.Redis.Addr))
 		}
+		// 启动 Redis 心跳
+		go func() {
+			interval := time.Duration(c.Redis.HeartbeatSec) * time.Second
+			if interval < 2*time.Second { // 下限保护
+				interval = 2 * time.Second
+			}
+			var lastUp bool
+			for {
+				select {
+				case <-app.stopCh:
+					return
+				case <-time.After(interval):
+					ctx2, cancel2 := context.WithTimeout(context.Background(), time.Duration(c.Redis.PingTimeoutMS)*time.Millisecond)
+					err := r.Ping(ctx2)
+					cancel2()
+					if err != nil {
+						metrics.RedisUp.Set(0)
+						if lastUp { // 状态切换
+							l.Warn("redis_down", zap.Error(err))
+						}
+						lastUp = false
+					} else {
+						metrics.RedisUp.Set(1)
+						if !lastUp {
+							l.Info("redis_recovered")
+						}
+						lastUp = true
+					}
+				}
+			}
+		}()
 	}
 	if e != nil && len(c.Etcd.Endpoints) > 0 {
 		go func() {
@@ -137,21 +172,22 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 			if addrPort[0] == ':' { // 形如 :8080
 				port = addrPort[1:]
 			} else {
-				// 可能是 0.0.0.0:8080 或 127.0.0.1:8080
 				if host, p, err := net.SplitHostPort(addrPort); err == nil {
 					port = p
-					if host != "" && host != "0.0.0.0" && host != "::" { // 明确 host
-						// 保留, 后续 ip 使用 host
-					}
+					_ = host // host 不强制使用
 				}
+			}
+			if port == "" {
+				port = "0"
 			}
 			ip := firstNonLoopbackIPv4()
 			if ip == "" {
 				ip = "127.0.0.1"
 			}
-			serviceKey := fmt.Sprintf("/services/apiadmin/%s/%s/%s", c.AppMeta.Env, c.AppMeta.Version, instanceID)
+			// 将 key 的最后一段改为 ip:port，避免每次重启生成新的 instance_id key，便于稳定发现
+			serviceKey := fmt.Sprintf("/services/apiadmin/%s/%s/%s:%s", c.AppMeta.Env, c.AppMeta.Version, ip, port)
 			meta := map[string]interface{}{
-				"instance_id":  instanceID,
+				"instance_id":  instanceID, // 仍然保留 instance_id 作为内部唯一标识
 				"env":          c.AppMeta.Env,
 				"version":      c.AppMeta.Version,
 				"ip":           ip,
@@ -180,7 +216,9 @@ func NewApp(c *config.Config, l *logging.Logger, db *gorm.DB, r *redisrepo.Clien
 					continue
 				}
 				app.serviceKey = serviceKey
+				app.serviceVal = val // 缓存原始 value
 				app.leaseID = leaseID
+				metrics.EtcdUp.Set(1) // 注册成功标记UP
 				l.Info("etcd_registered", zap.String("key", serviceKey))
 				return
 			}
@@ -241,6 +279,7 @@ func (a *App) Close() {
 		if err := a.Etcd.Deregister(ctx, a.serviceKey, a.leaseID); err != nil {
 			a.Logger.Error("etcd_deregister_failed", zap.Error(err))
 		}
+		metrics.EtcdUp.Set(0) // 下线标记
 	}
 	if a.DB != nil {
 		if sqlDB, err := a.DB.DB(); err == nil {
@@ -274,6 +313,10 @@ func (a *App) Close() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = a.AsyncAccessSender.Close(ctx)
+	}
+	// 关闭心跳
+	if a.stopCh != nil {
+		close(a.stopCh)
 	}
 }
 

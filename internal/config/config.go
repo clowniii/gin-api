@@ -26,23 +26,27 @@ type Config struct {
 		ReadTimeoutMS  int    `mapstructure:"read_timeout_ms"`
 		WriteTimeoutMS int    `mapstructure:"write_timeout_ms"`
 		PingTimeoutMS  int    `mapstructure:"ping_timeout_ms"`
+		HeartbeatSec   int    `mapstructure:"heartbeat_seconds"` // 新增: redis 心跳检测间隔秒
 	} `mapstructure:"redis"`
 	Kafka struct {
 		Brokers    []string `mapstructure:"brokers"`
 		OpLogTopic string   `mapstructure:"op_log_topic"`
 	} `mapstructure:"kafka"`
 	Etcd struct {
-		Endpoints []string `mapstructure:"endpoints"`
-		TTL       int      `mapstructure:"ttl"`
+		Endpoints    []string `mapstructure:"endpoints"`
+		TTL          int      `mapstructure:"ttl"`
+		HeartbeatSec int      `mapstructure:"heartbeat_seconds"` // 新增: etcd 心跳检测间隔秒
 	} `mapstructure:"etcd"`
 	JWT struct {
 		Secret        string `mapstructure:"secret"`
 		ExpireSeconds int    `mapstructure:"expire_seconds"`
 		Issuer        string `mapstructure:"issuer"`
 	} `mapstructure:"jwt"`
-	Auth struct { // 新增: 认证/会话相关配置
-		SessionTTLSeconds int  `mapstructure:"session_ttl_seconds"`
-		RotateRefresh     bool `mapstructure:"rotate_refresh"` // 是否在 refresh 时旋转 refresh token
+	Auth struct { // 扩展: 认证/会话相关配置
+		SessionTTLSeconds int    `mapstructure:"session_ttl_seconds"`
+		RotateRefresh     bool   `mapstructure:"rotate_refresh"`     // 是否在 refresh 时旋转 refresh token
+		LoginMode         string `mapstructure:"login_mode"`         // single|multi 单端/多端登录
+		MaxMultiSessions  int    `mapstructure:"max_multi_sessions"` // （可选）多端模式下最大会话数, 0 表示不限制
 	} `mapstructure:"auth"`
 	Log struct {
 		Level            string `mapstructure:"level"`
@@ -105,9 +109,14 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("redis.read_timeout_ms", 500)
 	v.SetDefault("redis.write_timeout_ms", 500)
 	v.SetDefault("redis.ping_timeout_ms", 500)
+	v.SetDefault("redis.heartbeat_seconds", 10)
 	// Auth 默认
 	v.SetDefault("auth.session_ttl_seconds", 300) // 5 分钟
 	v.SetDefault("auth.rotate_refresh", true)
+	v.SetDefault("auth.login_mode", "multi")
+	v.SetDefault("auth.max_multi_sessions", 0)
+	// Etcd 默认
+	v.SetDefault("etcd.heartbeat_seconds", 10)
 	var c Config
 	if err := v.Unmarshal(&c); err != nil {
 		return nil, err
@@ -164,6 +173,19 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Auth.SessionTTLSeconds <= 0 { // 容错
 		c.Auth.SessionTTLSeconds = 300
+	}
+	if c.Redis.HeartbeatSec <= 0 {
+		c.Redis.HeartbeatSec = 10
+	}
+	if c.Etcd.HeartbeatSec <= 0 {
+		c.Etcd.HeartbeatSec = 10
+	}
+	// LoginMode 规范化
+	if c.Auth.LoginMode != "single" && c.Auth.LoginMode != "multi" {
+		c.Auth.LoginMode = "multi"
+	}
+	if c.Auth.MaxMultiSessions < 0 {
+		c.Auth.MaxMultiSessions = 0
 	}
 	return &c, nil
 }
